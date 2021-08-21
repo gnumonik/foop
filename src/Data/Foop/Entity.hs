@@ -3,6 +3,7 @@
 module Data.Foop.Entity ( Prototype(..)
                         , EntityQ(..)
                         , EntitySpec(..)
+                        , EvalSpec(..)
                         , defaultEval
                         , mkEval
                         , mkEntity

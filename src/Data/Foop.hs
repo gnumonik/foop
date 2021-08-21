@@ -7,6 +7,7 @@ module Data.Foop (
 import Data.Foop.Entity
     ( EntitySpec(..),
       EntityQ(..),
+      EvalSpec(..),
       defaultEval,
       mkEval,
       mkEntity,
