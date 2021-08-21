@@ -2,9 +2,8 @@
 
 module Data.Foop.EntityF ( EntityM(..)
                          , EntityF(..)
-                         , withContext
-                         , getContext
-                         , QueryBox(..)) where
+                         , QueryBox(..)
+                         , MonadLook(..)) where
 
 
 
@@ -52,57 +51,41 @@ import Data.Profunctor (Profunctor(rmap))
                                   argument. 
 --}
 
+class Monad m => MonadLook l m where 
+  look :: m l 
+
 data QueryBox :: (Type -> Type) -> Type -> Type where 
   MkQueryBox :: Coyoneda f a -> (() -> a) -> QueryBox f a 
 
 instance Functor (QueryBox f) where 
   fmap f (MkQueryBox q g) = MkQueryBox (fmap f q) (rmap f g) 
 
-type EntityF :: Type -> Type -> (Type -> Type) -> Type -> Type -> (Type -> Type) -> Type -> Type 
-data EntityF context state query action output m a 
+type EntityF :: Type -> Type -> (Type -> Type) -> (Type -> Type) -> Type -> Type 
+data EntityF context state query m a 
   = State (state -> (a,state))
   | Lift (m a)
   | Ask (context -> a )
-  | Query (QueryBox query a) 
+  | Query (Coyoneda query a) 
 
-instance Functor m => Functor (EntityF i state query action output m) where
+instance Functor m => Functor (EntityF i state query m) where
   fmap f = \case 
     State k   -> State (first f . k)
     Lift ma   -> Lift (f <$> ma)
     Ask r     -> Ask $ fmap f r
     Query qb  -> Query $ fmap f qb 
 
-newtype EntityM i state query action  output m a = EntityM (Free (EntityF i state query action output m) a) deriving (Functor, Applicative, Monad)  
+newtype EntityM i state query  m a = EntityM (Free (EntityF i state query m) a) deriving (Functor, Applicative, Monad)  
 
-instance Functor m => MonadState s (EntityM r s q a o m) where 
+instance Functor m => MonadState s (EntityM r s q m) where 
   state f = EntityM . liftF . State $ f 
 
-instance MonadIO m => MonadIO (EntityM r s q a o m) where 
+instance MonadIO m => MonadIO (EntityM r s q m) where 
   liftIO m = EntityM . liftF . Lift . liftIO $ m
 
-instance MonadTrans (EntityM r s q a o) where 
+instance MonadTrans (EntityM r s q ) where 
   lift = EntityM . liftF . Lift 
 
-withContext :: Functor m => (r -> x) -> EntityM r s q a o m x
-withContext f =  EntityM . liftF . Ask $ \r -> f r
+instance Functor m => MonadLook l (EntityM l s q m) where 
+  look = EntityM . liftF . Ask $ id 
 
-getContext :: Functor m => EntityM r s q a o m r 
-getContext = EntityM . liftF . Ask $ id 
-
-
-type Tell f = () -> f ()
-
-mkTell :: forall f. Tell f -> f ()
-mkTell action = action ()
-
-
-tell :: Functor m => Tell q -> EntityM r s q a o m ()
-tell q = EntityM . liftF . Query $ MkQueryBox (liftCoyoneda $ q ()) (const ())
-
-type Request f a = (a -> a) -> f a 
-
-mkRequest :: forall f a. Request f a -> f a 
-mkRequest req = req id 
-
-request :: Functor m => Request q x -> EntityM r s q a o m x
-request q = EntityM . liftF . Query $ MkQueryBox (liftCoyoneda $ q id) ()
+  

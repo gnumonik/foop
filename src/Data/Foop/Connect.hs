@@ -7,15 +7,14 @@ import Data.Foop.Eval
 import Data.Profunctor
 import Control.Monad.IO.Class (MonadIO)
 import Control.Monad (foldM)
+import Data.Functor ((<&>))
 
-fanout :: forall t m i o. (Foldable t, MonadIO m) => i -> t (Entity m i o) -> m [o]
+fanout :: forall t m q x. (Foldable t, MonadIO m) => q x -> t (Entity m q) -> m [x]
 fanout i xs = foldM go [] xs  
   where 
-    go :: [o] -> Entity m i o -> m [o]
-    go acc e = run i e >>= \case 
-      Nothing -> pure acc 
-      Just o  -> pure $ o:acc
+    go :: [x] -> Entity m q -> m [x]
+    go acc e = run i e <&> (:acc)
 
-fanout_ :: forall t m i o. (Foldable t, MonadIO m) => i -> t (Entity m i o) -> m ()
+fanout_ :: forall t m q x. (Foldable t, MonadIO m) => q x -> t (Entity m q) -> m ()
 fanout_ i xs = fanout i xs >> pure ()
 
