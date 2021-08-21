@@ -42,6 +42,7 @@ library
     , stm
     , profunctors
     , comonad
+    , kan-extensions
   default-language: Haskell2010
 
   default-extensions: 
