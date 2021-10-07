@@ -5,20 +5,7 @@ module Data.Foop (
 ) where
 
 import Data.Foop.Entity
-    ( type (:~>),
-      NT(..),
-      type (~>),
-      Prototype(..),
-      apNT,
-      mkEval,
-      mkEntity,
-      AlgebraQ(..),
-      Spec(..) )
-
-
 
 import Data.Foop.EntityF
-    ( EntityM(..), EntityF(..), QueryBox(..), MonadLook(..) )
 
-
-import Data.Foop.Eval ( Entity(..), new, run ) 
+import Data.Foop.Eval

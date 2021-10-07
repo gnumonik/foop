@@ -1,18 +1,20 @@
 {-# LANGUAGE RecordWildCards #-}
-module Data.Foop.Eval (new, run, Entity(..)) where
+module Data.Foop.Eval (new, run, Entity(..), type Tell, type Request, tell, request) where
 
+{-- need to not export run --}
 
-import Control.Monad.Free ( foldFree, retract ) 
+import Control.Monad.Free.Church ( foldF, retract ) 
 import qualified Control.Monad.Trans.State.Strict as ST
 import Control.Monad.Trans.Class ( MonadTrans(lift) ) 
 import Control.Monad.Reader ( MonadIO(..) ) 
-import Data.Kind ( Type ) 
+import Data.Kind ( Type, Constraint ) 
 import Control.Comonad.Store
     ( Comonad(extract), store, ComonadStore(seeks), Store ) 
 import Control.Concurrent.STM
     ( atomically, newTVarIO, readTVarIO, writeTVar, TVar )
 import Data.Foop.Entity
-import Data.Foop.EntityF ( EntityM(..), EntityF(..), QueryBox (MkQueryBox))
+    ( apNT, AlgebraQ(Q), Prototype(..), Spec(..) )
+import Data.Foop.EntityF ( EntityF(..), EntityM(EntityM) ) 
 import Data.Functor.Coyoneda
 
 -- | Evaluation State. Holds the Prototype Spec, the Prototype's State, and a Context which can be read from inside the Prototype monad 
@@ -71,7 +73,7 @@ mkEntity_ e = store go (ExEvalState e)
     go :: ExEvalState q m -> Transformer q m
     go ex@(ExEvalState es@EvalState {..}) = Transformer $ \qx -> do  
       let (EntityM ai) = apNT (_eval _entity) (Q . liftCoyoneda $ qx)
-      let  st          = foldFree (evalF es) ai
+      let  st          = foldF (evalF es) ai
       ST.runStateT st ex
       
 
@@ -90,7 +92,7 @@ type Tell q = () -> q ()
 tell :: forall m q. MonadIO m => Tell q -> Entity m q -> m ()
 tell q = run (q ())
 
-type Request f a = (a -> a) -> f a 
+type Request q a = (a -> a) -> q a 
 
 request :: forall m q x. MonadIO m => Request q x -> Entity m q -> m x 
 request q = run (q id) 
@@ -111,6 +113,11 @@ evalF EvalState {..} = \case
   Ask f   -> pure (f _context)
 
   Query q -> case apNT (_eval _entity) (Q q ) of 
-    EntityM ef -> foldFree (evalF (EvalState {..})) ef  
+    EntityM ef -> foldF (evalF (EvalState {..})) ef  
+
+
+
+
+
 
 

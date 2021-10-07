@@ -1,11 +1,8 @@
-{-# LANGUAGE RecordWildCards #-}
-
 module Data.Foop.Entity  where
-
 
 import Data.Kind ( Type ) 
 import Data.Foop.EntityF ( EntityM ) 
-import Data.Functor.Coyoneda
+import Data.Functor.Coyoneda ( Coyoneda(..) )
 import Data.Functor (($>))
 
 data Prototype :: Type -> (Type -> Type) -> (Type -> Type) -> Type where 
@@ -50,4 +47,5 @@ mkEval eval = NT go
 mkEntity :: Spec r s q m 
          -> Prototype r q m 
 mkEntity e = Prototype e 
+
 

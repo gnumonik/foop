@@ -40,7 +40,6 @@ library
     , mtl 
     , transformers 
     , stm
-    , profunctors
     , comonad
     , kan-extensions
   default-language: Haskell2010

@@ -3,8 +3,6 @@ module Data.Foop.Connect where
 import Data.Foop.Entity 
 import Data.Foop.EntityF 
 import Data.Foop.Eval 
-
-import Data.Profunctor
 import Control.Monad.IO.Class (MonadIO)
 import Control.Monad (foldM)
 import Data.Functor ((<&>))
