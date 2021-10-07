@@ -2,7 +2,7 @@
 
 Small free-monad based library for facilitating (something roughly akin to) object-oriented programming in Haskell. 
 
-This is essentially the query-algebra portion of [Purescrit's Halogen](https://github.com/purescript-halogen/purescript-halogen), and most of the code is a translation to Haskell of the relevant parts of Halogen. The intended goal of this project is to facilitate type-safe and ergonomic bundling of stateful objects and "methods" on them. 
+This is essentially the query-algebra portion of [Purescript's Halogen](https://github.com/purescript-halogen/purescript-halogen), and most of the code is a translation to Haskell of the relevant parts of Halogen. The intended goal of this project is to facilitate type-safe and ergonomic bundling of stateful objects and "methods" on them. 
 
 ATM everything runs in IO. It might be possible to have objects run in ST, will need to think about it more. 
 
