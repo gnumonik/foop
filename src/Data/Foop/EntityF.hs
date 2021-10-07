@@ -16,8 +16,6 @@ import Data.Functor.Coyoneda ( Coyoneda )
 class Monad m => MonadLook l m where 
   look :: m l 
 
-
-
 type EntityF :: Type -> Type -> (Type -> Type) -> (Type -> Type) -> Type -> Type 
 data EntityF context state query m a 
   = State (state -> (a,state))

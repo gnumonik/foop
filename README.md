@@ -6,6 +6,6 @@ This is essentially the query-algebra portion of [Purescrit's Halogen](https://g
 
 ATM everything runs in IO. It might be possible to have objects run in ST, will need to think about it more. 
 
-("But why would we want that? Isn't it an FP anti-pattern?" - Maybe it is, but I ran into a problem where I needed both type-safety and "something like an OOP-ish object", and this is an attempted solution.)
+("But why would we want that? Isn't it an FP anti-pattern?" - Maybe it is, but I ran into a problem where I needed both type-safety and "something like an OOP-ish object", and this is significantly less ugly and awkward than anything else I tried.)
 
 At the moment this is fairly untested and entirely undocumented (i.e. this is a work in progress), but it is my intention to keep developing it in my free time. If you happen to know Halogen, you can probably figure out how it works by looking at Entity.hs/EntityF.hs :)
