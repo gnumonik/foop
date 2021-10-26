@@ -16,17 +16,19 @@ import Data.Functor.Coyoneda ( Coyoneda )
 import Data.Row 
 import Data.Constraint 
 
-type SlotData = (Type, Type -> Type, Type -> Type)
+type SlotData = (Type,Type, Type -> Type, Type -> Type)
 
 class Monad m => MonadLook l m where 
   look :: m l 
 
 type EntityF :: Row SlotData -> Type -> Type -> (Type -> Type) -> (Type -> Type) -> Type -> Type 
-data EntityF slots context state query m a 
-  = State (state -> (a,state))
-  | Lift (m a)
-  | Ask (context -> a)
-  | Query (Coyoneda query a)
+data EntityF slots context state query m a where 
+  State :: (state -> (a,state)) -> EntityF slots context state query m a
+  Lift  :: (m a) -> EntityF slots context state query m a
+  Ask   :: (context -> a) -> EntityF slots context state query m a
+  Query :: (Coyoneda query a) -> EntityF slots context state query m a
+ 
+
 
 instance Functor m => Functor (EntityF slots i state query m) where
   fmap f = \case 
@@ -34,6 +36,7 @@ instance Functor m => Functor (EntityF slots i state query m) where
     Lift ma   -> Lift (f <$> ma)
     Ask r     -> Ask $ fmap f r
     Query qb  -> Query $ fmap f qb 
+
 
 newtype EntityM slots i state query  m a = EntityM (F (EntityF slots i state query m) a) deriving (Functor, Applicative, Monad)  
 
