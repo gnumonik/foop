@@ -1,8 +1,10 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ConstraintKinds #-}
-module Data.Foop.Eval (new, run, Entity(..), type Tell, type Request, mkTell, mkRequest) where
+module Data.Foop.Eval 
+  -- (new, run, Entity(..), type Tell, type Request, mkTell, mkRequest) 
+  where
 
-{-- need to not export run --}
+{--
 
 import Control.Monad.Free.Church ( foldF, retract ) 
 import qualified Control.Monad.Trans.State as ST
@@ -220,3 +222,4 @@ evalF EvalState {..} = \case
 
 
 
+-}
