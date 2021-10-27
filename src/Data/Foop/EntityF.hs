@@ -3,9 +3,30 @@
 {-# LANGUAGE ConstraintKinds #-}
 
 module Data.Foop.EntityF ( EntityM(..)
-                         , EntityF(..)
                          , MonadLook(..)
-                         , type SlotData) where
+                         , type SlotData
+                         , Slot(..)
+                         , type SlotOrdC 
+                         , Prototype(..)
+                         , type (~>)
+                         , AlgebraQ(..)
+                         , Spec(..)
+                         , queryHandler
+                         , type ChildStorage 
+                         , type MkStorage 
+                         , type ChildC 
+                         , type StorageConstraint 
+                         , type RenderConstraint 
+                         , type MkRenderTree 
+                         , new 
+                         , type Tell 
+                         , type Request  
+                         , tell 
+                         , tellAll 
+                         , request 
+                         , requestAll 
+                         , delete 
+                         , create) where
 
 import Control.Monad.Free.Church ( liftF, F(..), foldF ) 
 import Control.Monad.State.Class ( MonadState(state) ) 
@@ -14,10 +35,8 @@ import Control.Monad.Reader ( MonadIO(..), MonadTrans(..) )
 import Control.Monad.IO.Class ( MonadIO(..) ) 
 import Data.Kind ( Type, Constraint ) 
 import Data.Bifunctor ( Bifunctor(first) ) 
-import Data.Functor.Coyoneda ( Coyoneda, liftCoyoneda )
-import Data.Row 
+import Data.Functor.Coyoneda ( Coyoneda(..), liftCoyoneda )
 import Data.Constraint 
-import Data.Functor.Coyoneda ( Coyoneda(..) )
 import Data.Functor (($>))
 import Data.Row.Records hiding (transform)
 import GHC.TypeLits (Symbol)
@@ -33,8 +52,7 @@ import qualified Control.Monad.State.Class as S
 import Control.Comonad.Store
 import Control.Concurrent.STM
 import qualified Control.Monad.State as ST
-
-
+import Data.Maybe (catMaybes)
 
 ------ EntityF.hs
 
@@ -71,6 +89,8 @@ data EntityF slots context state query m a where
 
   Delete :: Slot l slots q n i r -> i -> a -> EntityF slots context state query m a 
 
+  Render :: Slot l slots q n i r -> i -> a -> EntityF slots context state query m a
+
 
 instance Functor m => Functor (EntityF slots i state query m) where
   fmap f = \case 
@@ -82,6 +102,7 @@ instance Functor m => Functor (EntityF slots i state query m) where
     Surface key g    -> Surface key $ fmap f g  
     Create key i e a -> Create key i e (f a)
     Delete key i a   -> Delete key i (f a) 
+    Render key i a   -> Render key i (f a)
 
 
 newtype EntityM slots i state query  m a = EntityM (F (EntityF slots i state query m) a) deriving (Functor, Applicative, Monad)  
@@ -121,25 +142,6 @@ apNT (NT f) = f
 
 newtype AlgebraQ query a =  Q (Coyoneda query a) 
 
-{--
-
-It seems like we have 2 options for 'render': 
-
-  1) Parameterize the monad over some "render output" type and automatically construct a 
-     "tree" (in practice it'd probably be a Row of...something). This is hard but doable. 
-
-  2) Make the render function be of type `state -> IO ()`. This is easy and convenient but 
-     it introduces IO in a weird place. 
-
-So 1) seems preferable. In order to implement it, we'd have to add a type var parameter to 
-the spec (but not the EntityF/M, I think) which would have to be visible in the spec and 
-the EvalSpec. I'm not sure if we can existentialize it away in the ExEvalSpec but it's not a 
-huge deal if we can't, just makes things a bit more complicated
-
-The real problem is: How the fuck do we construct and manipulate the "tree"? And how do we restrict an 
-entity's rendering capacity such that it can only affect the component of the render tree that it represents?
---}
-
 type Spec :: Row SlotData -> Type -> Type -> Type -> (Type -> Type) -> (Type -> Type) -> Type 
 data Spec slots rendered context state query m where 
   MkSpec :: Forall slots SlotOrdC => 
@@ -153,11 +155,11 @@ defaultRender :: forall slots state  context query m
                . state -> EntityM slots  context state query m ()
 defaultRender = const . pure $ ()
 
-queryAlgebra :: forall slots r s q m 
+queryHandler :: forall slots r s q m 
         . Functor m
        => ( q ~> EntityM slots r s q m)
        -> (AlgebraQ q :~> EntityM slots r s q m)
-queryAlgebra eval = NT go 
+queryHandler eval = NT go 
   where 
     go :: forall x. AlgebraQ q x -> EntityM slots r s q m x
     go (Q q) = unCoyoneda (\g -> fmap  g . eval) q
@@ -172,9 +174,6 @@ prototype :: Forall slots SlotOrdC
           => Spec slots rendered context state query m 
           -> Prototype slots rendered context query m 
 prototype e = Prototype e 
-
-
-
 
 type ChildStorage :: Row SlotData -> Type 
 type ChildStorage slots = Rec (MkStorage slots)
@@ -284,6 +283,7 @@ type EntityStore r q  m = Store (ExEvalState r q  m) (Transformer r q m)
 -- EntityS is a TVar that holds a store comonad which spits out a *function* from the input to m newEvalState
 -- This is kind of a weird construction but because StateT isn't a comonad and we need a StateT from which we can *extract* the state at any time
 -- (for queries)
+
 newtype Entity r m q = Entity {entity :: TVar (EntityStore r q m)}
 
 mkEntity_ :: forall slots r cxt st q m
@@ -314,6 +314,13 @@ getSlot :: forall l i cxt r q q' m' slots st
         => EntityM slots cxt st q m' (M.Map i (Entity r m' q'))
 getSlot = EntityM . liftF $ Child (Slot :: Slot l slots q' m' i r) id 
 
+-- don't export 
+getSlot' :: Functor m 
+         => Slot l slots q n i r
+         -> EntityM slots context state query m (M.Map i (Entity r n q))
+getSlot' slot = EntityM . liftF $ Child slot id 
+
+-- don't export 
 getSurface :: forall l i cxt r q q' m' slots st 
             . (ChildC l i r q' m' slots, Functor m', MonadIO m')
            => EntityM slots cxt st q m' (M.Map i r)
@@ -323,9 +330,6 @@ type Tell q = () -> q ()
 
 mkTell :: Tell q -> q ()
 mkTell q  = q ()
-
--- deleteChildEntity :: (ChildC lbl i r q' m' slots, Ord i, MonadIO m')
--- deleteChildEntity = undefined 
 
 tell :: forall lbl i r q' m' q slots state context
       . (ChildC lbl i r q' m' slots, Ord i, MonadIO m')
@@ -338,16 +342,39 @@ tell i q = do
     Nothing -> pure () 
     Just e  -> do 
       lift (run (mkTell q) e)
-      liftIO (renderE e) >>= \case 
-        Nothing -> do 
-          mySurface <- getSurface @lbl @i @context @r @q @q' @m' 
-          undefined
-        Just _ -> undefined 
+      renderChild @lbl i
 
---tellAll :: forall m q t r. (Traversable t, MonadIO m) => Tell q -> t (Entity r m q) -> m ()
---tellAll q es = mapM_ (mkTell q) es  
-
+tellAll :: forall lbl i r q' m' q slots state context
+      . (ChildC lbl i r q' m' slots, Ord i, MonadIO m')
+     => Tell q' 
+     -> EntityM slots context state q m' () 
+tellAll q = do 
+  mySlot <- M.keys <$> getSlot @lbl 
+  mapM_ (\i -> tell @lbl i q) mySlot
+ 
 type Request q a = (a -> a) -> q a 
+
+request :: forall lbl i r q' m' q slots state context x
+      . (ChildC lbl i r q' m' slots, Ord i, MonadIO m')
+     => i 
+     -> Request q' x  
+     -> EntityM slots context state q m' (Maybe x)
+request i q = do 
+  mySlot <- getSlot @lbl  
+  case M.lookup i mySlot of 
+    Nothing -> pure Nothing 
+    Just e  -> do 
+      o <- lift (run (mkRequest q) e)
+      renderChild @lbl i 
+      pure (Just o)
+
+requestAll :: forall lbl i r q' m' q slots state context x
+      . (ChildC lbl i r q' m' slots, Ord i, MonadIO m')
+     => Request q' x  
+     -> EntityM slots context state q m' [x]
+requestAll q = do 
+  mySlot <- M.keys <$> getSlot @lbl 
+  catMaybes <$> mapM (\i -> request @lbl i q) mySlot 
 
 mkRequest :: Request q x -> q x
 mkRequest q = q id 
@@ -363,7 +390,7 @@ evalF :: forall slots' r' cxt' st' q'  m' a'
     => EvalState slots' r' cxt' st' q'  m'
     -> EntityF slots' cxt' st' q' m' a'
     -> ST.StateT (ExEvalState r' q' m') m' a' 
-evalF EvalState {..} = \case 
+evalF EvalState{..} = \case 
 
   State f -> case f _state of 
     (a,newState) -> do 
@@ -383,6 +410,7 @@ evalF EvalState {..} = \case
   Surface slot f -> case slot of 
     Slot -> pure . f $ _renderTree .! slotLabel slot 
 
+-- GHC doesn't get as mad if we do line-by-line "imperative style" vs trying to compose everything together
   Create slot i e a -> case slot of 
     Slot -> do 
       liftIO (renderE e) >>= \case 
@@ -411,3 +439,41 @@ evalF EvalState {..} = \case
                                 ,_renderTree = R.update l newSurface _renderTree 
                                 ,..}
       pure a 
+
+  Render slot i a -> case slot of 
+    Slot -> do
+      let l = slotLabel slot 
+      let oldSurface = _renderTree .! l
+      let oldSlot    = _storage    .! l
+      let newSurface = M.insert i oldSurface 
+      case M.lookup i oldSlot of 
+        Nothing -> pure a 
+        Just e  -> do 
+          liftIO (renderE e) >>= \case 
+            Nothing -> evalF EvalState{..} (Delete slot i a)
+            Just r -> do 
+              let newSurface = M.insert i r oldSurface 
+              ST.modify' $ \_ -> 
+                ExEvalState $ EvalState {_renderTree = R.update l newSurface _renderTree
+                                        ,..}
+              pure a  
+
+delete :: forall lbl i r q' m' q slots state context
+      . (ChildC lbl i r q' m' slots, Ord i, MonadIO m')
+     => i 
+     -> EntityM slots context state q m' ()
+delete i = EntityM . liftF $ Delete (Slot :: Slot lbl slots q' m' i r) i () 
+
+create :: forall lbl i r q' m' q slots state context
+      . (ChildC lbl i r q' m' slots, Ord i, MonadIO m')
+     => i
+     -> Entity r m' q'
+     -> EntityM slots context state q m' ()
+create i e = EntityM . liftF $ Create (Slot :: Slot lbl slots q' m' i r) i e ()
+
+-- internal, don't export
+renderChild :: forall lbl i r q' m' q slots state context
+      . (ChildC lbl i r q' m' slots, Ord i, MonadIO m')
+     => i
+     -> EntityM slots context state q m' ()
+renderChild i = EntityM . liftF $ Render (Slot :: Slot lbl slots q' m' i r) i ()

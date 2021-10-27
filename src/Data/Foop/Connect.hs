@@ -1,40 +1,41 @@
 module Data.Foop.Connect where
 
-import Data.Foop.Entity 
-import Data.Foop.EntityF 
-import Data.Foop.Eval 
+import Data.Foop
 import Control.Monad.IO.Class (MonadIO)
-import Control.Monad (foldM)
+import Control.Monad 
 import Data.Functor ((<&>))
 import Control.Monad.State.Class 
+import Data.Row
 
-fanout :: forall t m q x. (Foldable t, MonadIO m) => q x -> t (Entity m q) -> m [x]
-fanout i xs = foldM go [] xs  
-  where 
-    go :: [x] -> Entity m q -> m [x]
-    go acc e = run i e <&> (:acc)
 
-fanout_ :: forall t m q x. (Foldable t, MonadIO m) => q x -> t (Entity m q) -> m ()
-fanout_ i xs = fanout i xs >> pure ()
+testCounter :: Int -> IO () 
+testCounter n = do 
+  counter <- initObject mkCounter ()
+  replicateM_ n (tick counter)
+  count <- getCount counter 
+  print count 
 
 
 data CounterLogic x 
   = GetCount (Int -> x)
   | Tick x
 
-mkCounter :: Prototype () CounterLogic IO 
-mkCounter = mkEntity $ MkSpec {
-    _init = 0
-  , _eval = mkEval runCounterLogic 
+mkCounter :: Prototype Empty Int () CounterLogic IO 
+mkCounter = prototype $ MkSpec {
+    initialState = 0
+  , handleQuery = queryHandler runCounterLogic 
+  , render = Just
+  , slots = emptySlots 
   }
  where 
-   runCounterLogic :: CounterLogic ~> EntityM () Int CounterLogic IO
+   runCounterLogic :: CounterLogic ~> EntityM Empty () Int CounterLogic IO
    runCounterLogic = \case 
-      GetCount f -> do 
-        s <- get 
-        pure $ f s
+      GetCount f -> f <$> get 
       Tick x -> modify' (+1) >> pure x  
 
-getCount counter = request GetCount counter 
 
-tick counter = tell Tick counter 
+getCount :: forall m surface. MonadIO m => Object surface m CounterLogic -> m Int
+getCount e = query e (mkRequest GetCount)
+
+tick :: forall m surface. MonadIO m => Object surface m CounterLogic -> m ()
+tick e = query e (mkTell Tick)  
