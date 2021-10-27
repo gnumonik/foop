@@ -111,7 +111,8 @@ import Control.Applicative ( Applicative(liftA2) )
 ----------------------------------------------------
 ----------------------------------------------------
 
-
+-- can't add a SlotData argument to this (type cycle) so i need to find a way to do this w/ 
+-- data or figure something else out. bleh. 
 type SlotData = (Type,Type, Type -> Type)
 
 type Slots = Row SlotData 
@@ -134,7 +135,7 @@ slotLabel Slot = Label @l
 type EntityF :: Row SlotData -> Type -> (Type -> Type) -> (Type -> Type) -> Type -> Type 
 data EntityF slots  state query m a where 
   State  :: (state -> (a,state)) -> EntityF slots  state query m a
-
+ 
   Lift   :: m a -> EntityF slots state query m a
 
   Query  :: Coyoneda query a -> EntityF slots state query m a
@@ -147,6 +148,7 @@ data EntityF slots  state query m a where
 
   Delete :: Slot l slots q i r -> i -> a -> EntityF slots state query m a 
 
+  -- 3rd arg needs to be (RenderView r slots -> a)
   Render :: Slot l slots q i r -> i -> a -> EntityF slots state query m a
 
 instance Functor m => Functor (EntityF slots state query m) where
