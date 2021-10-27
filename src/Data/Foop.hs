@@ -98,8 +98,9 @@ import Control.Comonad.Store
     ( Comonad(extract), store, ComonadStore(pos), Store )
 import Control.Concurrent.STM
     ( atomically, newTVarIO, readTVarIO, writeTVar, TVar )
-import qualified Control.Monad.State as ST
+import qualified Control.Monad.State.Strict as ST
 import Data.Maybe (catMaybes)
+import System.IO.Unsafe
 
 ----------------------------------------------------
 ----------------------------------------------------
@@ -248,7 +249,6 @@ type family MkStorage_ lts where
   MkStorage_ '[] = Empty 
   MkStorage_ (l :-> '(r,i,q,m) ': lts) = Extend l (M.Map i (Entity r m q)) (MkStorage_ lts)
 
-
 type ChildC :: Symbol -> Type -> Type -> (Type -> Type) -> (Type -> Type) -> Row SlotData -> Constraint 
 type family ChildC childLabel index rendered q m slots where 
   ChildC lbl i r q m slots = (HasType lbl (M.Map i (Entity r m q)) (MkStorage slots)
@@ -279,6 +279,12 @@ type MkRenderTree_ :: [LT (Type,Type,Type -> Type,Type -> Type)] -> Row Type
 type family MkRenderTree_ slots where
   MkRenderTree_ '[] = Empty 
   MkRenderTree_ (l :-> '(r,i,q,m) ': lts) = Extend l (M.Map i r) (MkRenderTree_ lts)
+
+type RenderView :: Type -> Row SlotData -> Type 
+data RenderView r slots = RenderView r (Rec (MkRenderTree slots))
+
+instance (Forall (MkRenderTree slots) Show, Show r) => Show (RenderView r slots) where 
+  show (RenderView r tree) = "RenderView " <> show r <> show tree 
 
 type SlotConstraint slots = (StorageConstraint slots, RenderConstraint slots)
 
@@ -320,16 +326,17 @@ withExEval :: forall q m rendered  r
             -> r 
 withExEval (ExEvalState e) f = f e 
 
+{-# NOINLINE new #-} 
 new :: forall slots cxt q m r
         . (MonadIO m, SlotConstraint slots)
        => Prototype slots r cxt q  m 
        -> cxt 
-       -> m (Entity r m q ) 
-new (Prototype espec@MkSpec{..}) c  = liftIO (newTVarIO e') >>= \e -> pure $ Entity e 
+       -> Entity r m q  
+new (Prototype espec@MkSpec{..}) c  = Entity (unsafePerformIO $ newTVarIO e')
   where 
-    evalSt = initE espec c 
+    !evalSt = initE espec c 
 
-    e' = mkEntity_ evalSt 
+    !e' = mkEntity_ evalSt 
 
 initE :: SlotConstraint slots 
       => Spec slots r cxt st q m 
@@ -338,7 +345,7 @@ initE :: SlotConstraint slots
 initE espec@MkSpec {..} cxt  
   = EvalState {_entity     = espec 
               ,_state      = initialState 
-              ,_context    =  cxt 
+              ,_context    = cxt 
               ,_storage    = mkStorage slots
               ,_renderTree = mkRenderTree slots}  
 
@@ -488,7 +495,7 @@ evalF EvalState{..} = \case
           let oldSlot    = _storage    .! l
           let newSlot    = M.insert i e oldSlot
           let newSurface = M.insert i x oldSurface 
-          ST.modify' $ \_ -> 
+          ST.modify $ \_ -> 
             ExEvalState $ EvalState {_storage = R.update l newSlot _storage
                                     ,_renderTree = R.update l newSurface _renderTree
                                     ,..} 
@@ -501,7 +508,7 @@ evalF EvalState{..} = \case
       let oldSlot    = _storage    .! l
       let newSlot    = M.delete i oldSlot
       let newSurface = M.delete i oldSurface 
-      ST.modify' $ \_ -> 
+      ST.modify $ \_ -> 
         ExEvalState $ EvalState {_storage = R.update l newSlot _storage
                                 ,_renderTree = R.update l newSurface _renderTree 
                                 ,..}
@@ -520,7 +527,7 @@ evalF EvalState{..} = \case
             Nothing -> evalF EvalState{..} (Delete slot i a)
             Just r -> do 
               let newSurface = M.insert i r oldSurface 
-              ST.modify' $ \_ -> 
+              ST.modify $ \_ -> 
                 ExEvalState $ EvalState {_renderTree = R.update l newSurface _renderTree
                                         ,..}
               pure a  
@@ -531,12 +538,13 @@ delete :: forall lbl i r q' m' q slots state context
      -> EntityM slots context state q m' ()
 delete i = EntityM . liftF $ Delete (Slot :: Slot lbl slots q' m' i r) i () 
 
-create :: forall lbl i r q' m' q slots state context
-      . (ChildC lbl i r q' m' slots, Ord i, MonadIO m')
+create :: forall lbl i r q' m' q slots slots' state context context'
+      . (ChildC lbl i r q' m' slots, Ord i, MonadIO m', SlotConstraint slots')
      => i
-     -> Entity r m' q'
+     -> Prototype slots' r context' q' m'
+     -> context'
      -> EntityM slots context state q m' ()
-create i e = EntityM . liftF $ Create (Slot :: Slot lbl slots q' m' i r) i e ()
+create i p cxt = EntityM . liftF $ Create (Slot :: Slot lbl slots q' m' i r) i (new p cxt) ()
 
 -- internal, don't export
 renderChild :: forall lbl i r q' m' q slots state context
@@ -558,10 +566,8 @@ newtype Object r m q = Object (Entity r m q)
 initObject :: (MonadIO m, SlotConstraint slots)
             => Prototype slots surface context query m 
             -> context 
-            -> m (Object surface m query)
-initObject p cxt = do 
-  e <- new p cxt 
-  pure . Object $ e 
+            -> Object surface m query
+initObject p cxt = Object $ new p cxt 
 
 query :: MonadIO m 
       => Object surface m query 
@@ -569,5 +575,9 @@ query :: MonadIO m
       -> m x 
 query (Object e) q = run q e
 
-
+viewSurface :: MonadIO m => Object surface m query -> m surface 
+viewSurface (Object (Entity e)) 
+  = liftIO (readTVarIO e) >>= \eStore ->
+    case pos eStore of 
+      ExEvalState (EvalState {..}) -> undefined
 
