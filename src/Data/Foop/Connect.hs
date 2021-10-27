@@ -1,18 +1,26 @@
 module Data.Foop.Connect where
 
 import Data.Foop
-import Control.Monad.IO.Class (MonadIO)
+import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad 
 import Data.Functor ((<&>))
 import Control.Monad.State.Class 
 import Data.Row
 import Data.Proxy 
+import Control.Concurrent.STM 
 
-testCounter :: Int -> IO () 
-testCounter n = do 
-  let counter = initObject mkCounter ()
-  replicateM_ n (tick counter)
-  count <- getCount counter 
+
+testCounter :: IO () 
+testCounter = do 
+  counter <- activate mkCounter ()
+  count <- atomically $ do 
+              replicateM_ 10 (tick counter)
+              printCount counter 
+              replicateM_ 100 (tick counter)
+              printCount counter 
+              replicateM_ 1000 (tick counter)
+              printCount counter
+              getCount counter 
   print count 
 
 
@@ -21,8 +29,9 @@ type (:=) a b = a .== b
 data CounterLogic x 
   = GetCount (Int -> x)
   | Tick x
+  | PrintCount x 
 
-mkCounter :: Prototype Empty String () CounterLogic IO 
+mkCounter :: Prototype Empty String () CounterLogic 
 mkCounter = prototype $ MkSpec {
     initialState = 0
   , handleQuery = queryHandler runCounterLogic 
@@ -30,16 +39,26 @@ mkCounter = prototype $ MkSpec {
   , slots = emptySlots 
   }
  where 
-   runCounterLogic :: CounterLogic ~> EntityM Empty () Int CounterLogic IO
+   runCounterLogic :: CounterLogic ~> EntityM Empty () Int CounterLogic STM
    runCounterLogic = \case 
       GetCount f -> f <$> get 
-      Tick x -> modify' (+1) >> pure x  
 
-getCount :: forall m surface. MonadIO m => Object surface m CounterLogic -> m Int
+      Tick x -> modify' (+1) >> pure x  
+      
+      PrintCount x -> do 
+        s <- get 
+        _ <- liftIO (print s)
+        pure x 
+
+printCount :: Object surface CounterLogic -> STM ()
+printCount e = query e (mkTell PrintCount)
+
+getCount :: Object surface CounterLogic -> STM Int
 getCount e = query e (mkRequest GetCount)
 
-tick :: forall m surface. MonadIO m => Object surface m CounterLogic -> m ()
+tick :: Object surface CounterLogic -> STM ()
 tick e = query e (mkTell Tick)  
+
 {--
 data CountersLogic x 
   = NewCounter Int x 
