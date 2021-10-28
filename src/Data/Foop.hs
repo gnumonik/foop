@@ -52,7 +52,7 @@ import Control.Monad.Trans.Class ( MonadTrans(..) )
 import Control.Monad.Reader ( MonadIO(..), MonadTrans(..) ) 
 import Control.Monad.IO.Class ( MonadIO(..) ) 
 import Data.Kind ( Type, Constraint ) 
-import Data.Bifunctor ( Bifunctor(first) ) 
+import Data.Bifunctor ( Bifunctor(first, bimap) ) 
 import Data.Functor.Coyoneda ( Coyoneda(..), liftCoyoneda )
 import Data.Constraint ( Constraint ) 
 import Data.Functor (($>))
@@ -77,7 +77,7 @@ import Data.Row
       (.!),
       Forall,
       HasType,
-      WellBehaved ) 
+      WellBehaved, (.==), type (.==), (.+), type (.+) ) 
 import Data.Row.Internal
     ( KnownSymbol,
       Extend,
@@ -100,10 +100,99 @@ import Control.Concurrent.STM
     ( atomically, newTVarIO, readTVarIO, writeTVar, TVar, STM, readTVar, newTVar, TMVar, putTMVar, TBQueue, readTBQueue, newTBQueueIO, mkWeakTVar, newEmptyTMVar, writeTBQueue, takeTMVar )
 import qualified Control.Monad.State.Strict as ST
 import Data.Maybe (catMaybes)
-import Control.Monad (forever)
+import Control.Monad (forever, join, (<=<), (>=>))
 import System.Mem.Weak 
 import Control.Concurrent.Async 
 import Control.Applicative ( Applicative(liftA2) ) 
+import Control.Monad.Codensity 
+import Data.Functor.Compose 
+import Control.Applicative.Lift 
+import Control.Category ((>>>))
+import Data.Either 
+-- not really sure if this will do what i want but i think there's a good chance it will?
+
+-- We can't directly make this a monad in the way we want. (We can make it a monad but the return of bind will always have to be 
+-- IO, which makes it somewhat useless)
+-- My thought is that if we leave it as an applicative and wrap it in Codensity, then
+-- it just miiiiight group STM operations together automagically in the way i want. maybe. 
+
+-- note: i'm not a moron; the point of this isn't to embed IO inside of STM transactions. it's to automate the 
+-- batching of stm transactions *when possible*.
+
+-- this might work if we can pattern match?
+
+type (:\/) a b = Either a b  
+
+newtype OusiaF a = OusiaF ((Compose (Lift (Compose STM IO)) STM) a) deriving (Functor, Applicative)
+
+-- no fucking clue whether this obeys the laws
+instance Monad OusiaF where 
+  return = pure 
+
+  ma >>= f = joinOusiaF (fmap f ma)
+
+-- personally i find it easier to think left to right, 
+-- and this is some hard thinkin', 
+-- so imma go with (>>>) instead of (.)
+runOusiaF :: forall a. OusiaF a -> IO a 
+runOusiaF (OusiaF mx) 
+  = elimLift atomically ((getCompose >>> atomically >>> join) >=> atomically) (getCompose mx)
+
+reducia :: OusiaF a -> Either (STM a) (IO a)
+reducia (OusiaF o) = case getCompose o of 
+  Pure s  -> Left s 
+  Other x -> Right $ ((getCompose >>> atomically >>> join) >=> atomically) x
+
+
+distIO :: STM (IO a) -> IO (STM a)
+distIO x = fmap pure (join $ atomically x)
+
+flipEither :: Either a b -> Either b a 
+flipEither = \case 
+  Left l -> Right l 
+  Right r -> Left r 
+
+reduceL :: forall f g a. (Monad f,Monad g) => (f ~> g) -> f (f a :\/ g a) -> f a :\/ g a 
+reduceL nt e  =  flipEither $ first (join . nt) $ join <$> traverse (\case {Right ga -> Left (pure ga); Left fa -> Right fa}) e 
+
+reduceR :: forall f g a. (Monad f, Monad g) => (f ~> g) -> g (f a :\/ g a) ->  f a :\/ g a 
+reduceR nt e =  join <$> traverse (\case {Right ga -> Right ga; Left fa -> Right (nt fa)}) e 
+
+liftOusiaF :: (STM a :\/ IO a) ->  OusiaF a 
+liftOusiaF = \case 
+  Left stm -> OusiaF . Compose . Pure $ stm 
+  Right io -> OusiaF . Compose . Other . Compose . pure . fmap pure $ io 
+
+joinOusiaF :: OusiaF (OusiaF a) -> OusiaF a
+joinOusiaF (o :: OusiaF (OusiaF a)) 
+  = liftOusiaF 
+  . either (reduceL atomically) (reduceR atomically) 
+  . bimap (fmap reducia) (fmap reducia) 
+  $ reducia o
+
+-- test whether this is a performance improvement. feel like it might be?
+newtype OusiaK a = OusiaK (Codensity OusiaF a) deriving (Functor, Applicative, Monad)
+
+
+liftSTM :: forall a. STM a -> OusiaK a 
+liftSTM stm = OusiaK $ Codensity $ \k -> go k stm 
+  where 
+    go :: (a -> OusiaF b) -> STM a -> OusiaF b
+    go f stm = undefined 
+
+
+instance MonadIO OusiaK where 
+  liftIO io = OusiaK 
+            $ Codensity $ \k -> 
+                OusiaF 
+              . Compose 
+              . Other 
+              . Compose 
+              . pure 
+              . fmap pure 
+              $ (runOusiaF . k) 
+              =<< io
+
 
 ----------------------------------------------------
 ----------------------------------------------------
@@ -113,7 +202,47 @@ import Control.Applicative ( Applicative(liftA2) )
 
 -- can't add a SlotData argument to this (type cycle) so i need to find a way to do this w/ 
 -- data or figure something else out. bleh. 
+
 type SlotData = (Type,Type, Type -> Type)
+
+
+type SlotData' :: Type -> Type -> (Type -> Type) -> Row Type -> Type 
+data SlotData' surface index query slots 
+
+type XMkRenderTree :: Type -> Row Type 
+type family XMkRenderTree slots where 
+  XMkRenderTree (SlotData' surface index query (R lts)) 
+    = Node surface (XMkRenderTree_ lts)
+
+type XMkRenderTree_ :: [LT Type] -> Row Type 
+type family XMkRenderTree_ slotData where
+  XMkRenderTree_ '[] = Empty 
+  XMkRenderTree_ (l :-> (SlotData' surface index query (R children)) ': lts) 
+    = Extend l (M.Map index (Rec (Node surface (XMkRenderTree_ children)))) (XMkRenderTree_ lts)
+
+type Node :: Type -> Row Type -> Row Type
+type Node surface slots = ( "children" .== Rec slots
+                         .+ "surface"  .== surface ) 
+
+-- 
+mkRenderNode :: forall surface index query slots 
+              . Proxy (SlotData' surface index query slots) 
+             -> surface 
+             -> Rec (XMkRenderTree (SlotData' surface index query slots) )
+mkRenderNode Proxy surface = undefined 
+
+doop :: SlotData' String Int Maybe Empty 
+doop = undefined 
+
+boop :: Proxy (SlotData' Char Double (Either Bool) ( "child1" .== SlotData' String Int Maybe Empty 
+                                           .+ "child2" .== SlotData' [Bool] Char (Store Int) ("child3" .== SlotData' () () Maybe Empty)))
+boop = Proxy 
+
+xMkRenderTree :: Proxy (SlotData' surface index query slots) -> Proxy (XMkRenderTree (SlotData' surface index query slots) ) 
+xMkRenderTree Proxy = Proxy 
+
+
+bop = xMkRenderTree boop 
 
 type Slots = Row SlotData 
 
@@ -123,16 +252,16 @@ type MkSlot surface index query = '(surface,index,query)
 class Monad m => MonadLook l m where 
   look :: m l 
 
-data Slot :: Symbol -> Row SlotData -> (Type -> Type) -> Type -> Type -> Type where 
-  Slot :: ( HasType l (M.Map i (Entity r q)) (MkStorage slots)
-          , HasType l (M.Map i r) (MkRenderTree slots)
+data Slot :: Symbol -> Type -> (Type -> Type) -> Type -> Type  -> Type where 
+  Slot :: ( HasType l (M.Map i (Entity r q)) (MkStorage parentSlots)
+          , HasType l (M.Map i r) (XMkRenderTree parentSlots)
           , KnownSymbol l 
-          , Ord i) => Slot l slots q i r
+          , Ord i) => Slot l parentSlots q i r 
 
 slotLabel :: forall slots q i r l. Slot l slots q i r -> Label l 
 slotLabel Slot = Label @l
 
-type EntityF :: Row SlotData -> Type -> (Type -> Type) -> (Type -> Type) -> Type -> Type 
+type EntityF :: Type -> Type -> (Type -> Type) -> (Type -> Type) -> Type -> Type 
 data EntityF slots  state query m a where 
   State  :: (state -> (a,state)) -> EntityF slots  state query m a
  
@@ -140,6 +269,7 @@ data EntityF slots  state query m a where
 
   Query  :: Coyoneda query a -> EntityF slots state query m a
 
+  -- this is superfluous
   Child  :: Slot l slots q i r -> (M.Map i (Entity r q) -> a) -> EntityF slots state query m a 
 
   Surface:: Slot l slots q i r -> (M.Map i r -> a) -> EntityF slots state query m a 
@@ -148,8 +278,8 @@ data EntityF slots  state query m a where
 
   Delete :: Slot l slots q i r -> i -> a -> EntityF slots state query m a 
 
-  -- 3rd arg needs to be (RenderView r slots -> a)
-  Render :: Slot l slots q i r -> i -> a -> EntityF slots state query m a
+  -- 3rd arg needs to be (RenderNode r slots -> a)
+  Render :: Slot l slots q i r -> i -> (r -> a) -> EntityF slots state query m a
 
 instance Functor m => Functor (EntityF slots state query m) where
   fmap f = \case 
@@ -160,7 +290,7 @@ instance Functor m => Functor (EntityF slots state query m) where
     Surface key g    -> Surface key $ fmap f g  
     Create key i e a -> Create key i e (f a)
     Delete key i a   -> Delete key i (f a) 
-    Render key i a   -> Render key i (f a)
+    Render key i g   -> Render key i (fmap f g)
 
 newtype EntityM slots state query m a = EntityM (F (EntityF slots state query m) a) deriving (Functor, Applicative, Monad)  
 
@@ -183,9 +313,9 @@ type SlotOrdC :: (Type, Type, Type -> Type) -> Constraint
 class SlotOrdC slot where 
 instance Ord i => SlotOrdC '(r,i,q) 
 
-data Prototype :: Row SlotData -> Type ->  (Type -> Type) -> Type where 
-  Prototype :: Forall slots SlotOrdC 
-            => Spec slots surface  state query 
+data Prototype :: Type -> Type ->  (Type -> Type) -> Type where 
+  Prototype :: -- Forall slots SlotOrdC  => 
+               Spec slots surface  state query 
             -> Prototype slots surface query 
 
 type (~>) m n = (forall a. m a -> n a) 
@@ -200,21 +330,18 @@ apNT (NT f) = f
 
 newtype AlgebraQ query a =  Q (Coyoneda query a) 
 
-type Spec :: Row SlotData -> Type -> Type -> (Type -> Type) ->  Type 
-data Spec slots surface state query where 
-  MkSpec :: Forall slots SlotOrdC => 
+type Spec :: Type -> Type -> Type -> (Type -> Type) -> Type 
+data Spec slots surface state query  where 
+  MkSpec :: 
+  -- Forall slots SlotOrdC => replace this w/ a working constraint
     { initialState   :: state -- For existential-ey reasons this has to be a function
-    , handleQuery    :: AlgebraQ query :~> EntityM slots state query STM
-    , render         :: state -> Maybe surface -- I don't like this being IO () but i can't see a way around it -_-
+    , handleQuery    :: AlgebraQ query :~> EntityM slots state query OusiaK
+    , render         :: state -> surface -- I don't like this being IO () but i can't see a way around it -_-
     , slots          :: Proxy slots 
     } -> Spec slots surface state query 
 
 emptySlots :: Proxy Empty 
 emptySlots = Proxy 
-
-defaultRender :: forall slots state query m 
-               . state -> EntityM slots state query m ()
-defaultRender = const . pure $ ()
 
 queryHandler :: forall slots s q m 
         . Functor m
@@ -231,44 +358,45 @@ queryHandler eval = NT go
                -> r 
     unCoyoneda f (Coyoneda ba fb) = f ba fb 
 
-prototype :: Forall slots SlotOrdC 
-          => Spec slots surface state query 
+prototype :: -- Forall slots SlotOrdC 
+             Spec slots surface state query 
           -> Prototype slots surface query 
 prototype = Prototype 
 
-type ChildStorage :: Row SlotData -> Type 
+type ChildStorage :: Type -> Type 
 type ChildStorage slots = Rec (MkStorage slots)
 
-type MkStorage ::  Row SlotData -> Row Type 
-type family MkStorage rt where 
-  MkStorage (R lts) = MkStorage_ lts 
+type MkStorage ::  Type -> Row Type 
+type family MkStorage slotData where 
+  MkStorage (SlotData' surface index query (R lts)) = MkStorage_ lts 
 
-type MkStorage_ :: [LT (Type,Type,Type -> Type)] -> Row Type  
+type MkStorage_ :: [LT Type] -> Row Type  
 type family MkStorage_ lts where 
   MkStorage_ '[] = Empty 
-  MkStorage_ (l :-> '(r,i,q) ': lts) = Extend l (M.Map i (Entity r q)) (MkStorage_ lts)
 
-type ChildC :: Symbol -> Type -> Type -> (Type -> Type) ->  Row SlotData -> Constraint 
+  MkStorage_ (l :-> SlotData' surface index query (R children) ': lts) 
+    = Extend l (M.Map index (Entity surface query)) (MkStorage_ lts)
+
+type ChildC :: Symbol -> Type -> Type -> (Type -> Type) ->  Type -> Constraint 
 type family ChildC childLabel index surface q slots where 
   ChildC lbl i r q slots = (HasType lbl (M.Map i (Entity r q)) (MkStorage slots)
-                             ,HasType lbl (M.Map i r) (MkRenderTree slots)
+                            -- ,HasType lbl (M.Map i r) (XMkRenderTree slots) FIX!!!
                              ,SlotConstraint slots
                              ,KnownSymbol lbl
                              ,Ord i)
 
-type StorageConstraint :: Row SlotData -> Constraint 
+type StorageConstraint :: Type -> Constraint 
 type family StorageConstraint slots where 
-  StorageConstraint slots =  ( Forall slots SlotOrdC 
-                             , Forall (MkStorage slots) Default
-                             , WellBehaved slots
+  StorageConstraint slots =  ( -- Forall slots SlotOrdC , 
+                               Forall (MkStorage slots) Default
                              , WellBehaved (MkStorage slots)) 
 
-type RenderConstraint :: Row SlotData -> Constraint 
+type RenderConstraint :: Type -> Constraint 
 type family RenderConstraint slots where 
-  RenderConstraint slots = (Forall slots SlotOrdC 
-                           ,Forall (MkRenderTree slots) Default 
-                           ,WellBehaved slots 
-                           ,WellBehaved (MkRenderTree slots))
+  RenderConstraint slots = (-- Forall slots SlotOrdC 
+                           -- ,Forall (MkRenderTree slots) Default 
+                           --  WellBehaved slots 
+                           WellBehaved (XMkRenderTree slots))
 
 type MkRenderTree :: Row SlotData -> Row Type 
 type family MkRenderTree slots where 
@@ -279,11 +407,15 @@ type family MkRenderTree_ slots where
   MkRenderTree_ '[] = Empty 
   MkRenderTree_ (l :-> '(r,i,q) ': lts) = Extend l (M.Map i r) (MkRenderTree_ lts)
 
-type RenderView :: Type -> Row SlotData -> Type 
-data RenderView r slots = RenderView r (Rec (MkRenderTree slots))
+type RenderNode :: Type -> Row SlotData -> Type 
+data RenderNode r slots = RenderNode r (Rec (MkRenderTree slots))
 
-instance (Forall (MkRenderTree slots) Show, Show r) => Show (RenderView r slots) where 
-  show (RenderView r tree) = "RenderView " <> show r <> " " <> show tree 
+-- don't export
+mapSlots :: (Rec (MkRenderTree slots) -> Rec (MkRenderTree slots)) -> RenderNode r slots -> RenderNode r slots 
+mapSlots f (RenderNode r slots) = RenderNode r (f slots)
+
+instance (Forall (MkRenderTree slots) Show, Show r) => Show (RenderNode r slots) where 
+  show (RenderNode r tree) = "RenderNode " <> show r <> " " <> show tree 
 
 type SlotConstraint slots = (StorageConstraint slots, RenderConstraint slots)
 
@@ -293,8 +425,8 @@ mkStorage :: forall slots
 mkStorage proxy = R.default' @Default def
 
 mkRenderTree :: forall slots 
-              . SlotConstraint slots 
-            => Proxy slots -> Rec (MkRenderTree slots)
+              . -- SlotConstraint slots 
+                Proxy slots -> Rec (MkRenderTree slots)
 mkRenderTree proxy = R.default' @Default def 
 
 ----------------------------------------------------
@@ -305,21 +437,21 @@ mkRenderTree proxy = R.default' @Default def
 
 -- | Evaluation State. Holds the Prototype Spec, the Prototype's State, 
 --   and a Context which can be read from inside the Prototype monad 
-type EvalState :: Row SlotData -> Type -> Type -> (Type -> Type) -> Type
+type EvalState :: Type -> Type -> Type -> (Type -> Type) -> Type
 data EvalState slots surface st q 
   = EvalState {
       _entity     :: Spec slots surface st q 
     , _state      :: st 
     , _storage    :: Rec (MkStorage slots)
-    , _renderTree :: Rec (MkRenderTree slots)
+    , _renderTree :: Rec (XMkRenderTree slots)
     , _ioQ        :: TBQueue BoxedIO
   }
 
-data ExEvalState :: Type -> (Type -> Type) ->  Type where 
-  ExEvalState :: EvalState slots surface st q  
-              -> ExEvalState surface q 
+data ExEvalState :: Type -> (Type -> Type) -> Type where 
+  ExEvalState :: MonadIO m =>  EvalState slots surface st q   
+              -> ExEvalState surface q
 
-withExEval :: forall q surface  r
+withExEval :: forall q surface  r m
             . ExEvalState surface q 
             -> (forall slots cxt st. EvalState slots surface st q -> r)
             -> r 
@@ -336,20 +468,20 @@ new_ (Prototype espec@MkSpec{..}) q = newTVar e' >>= \eStore -> pure $  Entity e
 
     !e' = mkEntity_ evalSt 
 
-initE :: SlotConstraint slots 
-      => Spec slots r  st q 
+initE :: -- SlotConstraint slots 
+         Spec slots r  st q 
       -> TBQueue BoxedIO
       -> EvalState slots r st q 
 initE espec@MkSpec{..} ioQ  
   = EvalState {_entity     = espec 
               ,_state      = initialState 
               ,_storage    = mkStorage slots
-              ,_renderTree = mkRenderTree slots
+              ,_renderTree = mkRenderNode slots (render initialState) 
               ,_ioQ        = ioQ}  
 
-newtype Transformer r q = Transformer {transform :: forall x. q x -> STM (x,ExEvalState r q)}
+newtype Transformer r q = Transformer {transform :: forall x. q x -> OusiaK (x,ExEvalState r q)}
 
-type EntityStore r q = Store (ExEvalState r q ) (Transformer r q)
+type EntityStore r q = Store (ExEvalState r q) (Transformer r q)
 
 -- This is quite different from Halogen (which is the basis for all the Prototype stuff) so, quick explanation: 
 -- EntityS is a TVar that holds a store comonad which spits out a *function* from the input to m newEvalState
@@ -358,7 +490,7 @@ type EntityStore r q = Store (ExEvalState r q ) (Transformer r q)
 
 newtype Entity r q = Entity {entity :: TVar (EntityStore r q)}
 
-mkEntity_ :: forall slots surface  st query
+mkEntity_ :: forall slots surface  st query m 
            . EvalState slots surface st query -> EntityStore surface query 
 mkEntity_ e = store go (ExEvalState e)
   where 
@@ -411,7 +543,8 @@ tell i q = do
     Nothing -> pure () 
     Just e  -> do 
       lift (run (mkTell q) e)
-      renderChild @lbl i
+      _ <- renderChild @lbl i
+      pure ()
 
 tellAll :: forall lbl i r q' q slots state context
       . (ChildC lbl i r q' slots, Ord i)
@@ -434,7 +567,7 @@ request i q = do
     Nothing -> pure Nothing 
     Just e  -> do 
       o <- lift (run (mkRequest q) e)
-      renderChild @lbl i 
+      _ <- renderChild @lbl i 
       pure (Just o)
 
 requestAll :: forall lbl i r q' q slots state context x
@@ -454,10 +587,10 @@ renderE (Entity tv) = do
   case pos e of -- can't use let, something something monomorphism restriction 
     ExEvalState EvalState{..} -> pure $ render _entity _state 
 
-evalF :: forall slots' r' st' q'  m' a' 
-    .  EvalState slots' r' st' q'  
-    -> EntityF slots' st' q' STM a'
-    -> ST.StateT (ExEvalState r' q') STM a' 
+evalF :: forall slots' r' st' q' a' 
+    .  EvalState slots' r' st' q'
+    -> EntityF slots' st' q' OusiaK a'
+    -> ST.StateT (ExEvalState r' q') OusiaK a' 
 evalF EvalState{..} = \case 
 
   State f -> case f _state of 
@@ -508,23 +641,25 @@ evalF EvalState{..} = \case
                                 ,..}
       pure a 
 
-  Render slot i a -> case slot of 
+  Render slot i f -> case slot of 
     Slot -> do
       let l = slotLabel slot 
       let oldSurface = _renderTree .! l
       let oldSlot    = _storage    .! l
       let newSurface = M.insert i oldSurface 
       case M.lookup i oldSlot of 
-        Nothing -> pure a 
+        Nothing -> pure $ f Nothing 
         Just e  -> do 
           lift (renderE e) >>= \case 
-            Nothing -> evalF EvalState{..} (Delete slot i a)
+            Nothing -> do 
+              evalF EvalState{..} (Delete slot i ())
+              pure $ f Nothing 
             Just r -> do 
               let newSurface = M.insert i r oldSurface 
               ST.modify' $ \_ -> 
                 ExEvalState $ EvalState {_renderTree = R.update l newSurface _renderTree
                                         ,..}
-              pure a  
+              pure $ f (Just r)  
 
 delete :: forall lbl i r q'  q slots state 
       . (ChildC lbl i r q' slots, Ord i)
@@ -540,11 +675,11 @@ create :: forall lbl i r q' q slots slots' state
 create i p = EntityM . liftF $ Create (Slot :: Slot lbl slots q' i r) i (new_ p) ()
 
 -- internal, don't export
-renderChild :: forall lbl i r q' q slots state 
+renderChild :: forall lbl i r q' q slots state m  
       . (ChildC lbl i r q' slots, Ord i)
      => i
-     -> EntityM slots state q STM ()
-renderChild i = EntityM . liftF $ Render (Slot :: Slot lbl slots q' i r) i ()
+     -> EntityM slots state q m (Maybe (Rec (Node r (XMkRenderTree slots))))
+renderChild i = EntityM . liftF $ Render (Slot :: Slot lbl slots q' i r) i id
 
 -- don't export 
 type Object :: Type -> (Type -> Type) -> Type 
