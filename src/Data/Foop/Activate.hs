@@ -34,3 +34,24 @@ request' q o = query o (mkRequest q)
 observe :: Object surface query -> IO surface 
 observe (Object e) = renderE e 
 
+
+
+{-- 
+TO DO: 
+
+1) Add fields to the spec for handlers, add fields to EntityF for output 
+
+
+2) CLEAN UP THE RENDERING LOGIC! Conceptually it works but it needs a uniform interface 
+   and I'm pretty sure it doesn't render every time it needs to. 
+
+2.1) Add a surface field to EvalSpec{..}
+
+3) Think very hard and carefully about some way to construct the render tree
+   for an entire object which includes its children and provides a reasonable 
+   api for accessing it. It's quite hard with records, might be easier with a dependent or 
+   dynamic map? 
+
+I guess 3) isn't strictly necessary cuz halogen can't really do it either but it'd be nice. 
+Library is solid even if I can't figure it out though.
+--}

@@ -179,6 +179,7 @@ evalF EvalState{..} = \case
   State f -> case f _state of 
     (a,newState) -> do 
         let newSurface = render (renderer _entity) newState 
+        liftIO $ onRender (renderer _entity) newSurface 
         ST.modify' $ \_ -> ExEvalState $ EvalState {_state = newState,..}
         pure a 
 
