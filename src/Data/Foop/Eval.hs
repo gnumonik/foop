@@ -1,225 +1,266 @@
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ConstraintKinds #-}
-module Data.Foop.Eval 
-  -- (new, run, Entity(..), type Tell, type Request, mkTell, mkRequest) 
-  where
+module Data.Foop.Eval where
 
-{--
-
-import Control.Monad.Free.Church ( foldF, retract ) 
-import qualified Control.Monad.Trans.State as ST
-import Control.Monad.Trans.Class ( MonadTrans(lift) ) 
-import Control.Monad.Reader ( MonadIO(..) ) 
-import Data.Kind ( Type, Constraint ) 
+import Data.Foop.Types 
+import qualified Control.Monad.State as ST
+import qualified Data.Map as M
+import Control.Monad.IO.Class
+import qualified Data.Row.Records as R
+import Control.Monad.Trans.Class
+import Data.Row
+import Data.Foop.Prototype
+import Data.Functor.Coyoneda ( Coyoneda(..), liftCoyoneda )
+import Control.Monad.Free.Church
 import Control.Comonad.Store
-    ( Comonad(extract), store, ComonadStore(seeks, peek, pos), Store ) 
 import Control.Concurrent.STM
-    ( atomically, newTVarIO, readTVarIO, writeTVar, TVar )
-import Data.Foop.Entity
-    ( apNT, AlgebraQ(Q), Prototype(..), Spec(..), SlotOrdC )
-import Data.Foop.EntityF ( EntityF(..), EntityM(EntityM), SlotData ) 
-import Data.Functor.Coyoneda
-import Data.Row 
-import Data.Row.Internal
-import qualified Data.Map.Strict as M
-import qualified Data.Row.Records as R 
-import Data.Default 
-import Data.Proxy (Proxy(..))
-import Data.Singletons.TypeLits (Symbol)
-import qualified Control.Monad.State.Class as S 
+import Data.Maybe
 
--- storage stuff, has to be here for staging reasons; the type family that 
--- creates the storage type from the `slots` field of a Spec requires the 
--- "Entity" type to be in scope
+-- | Extracts a label `l` from a `SlotBox l slots q i r`
+slotLabel :: forall slots q i r l. SlotBox l slots q i r -> Label l 
+slotLabel SlotBox = Label @l
 
-type ChildStorage :: Row SlotData -> Type 
-type ChildStorage slots = Rec (MkStorage slots)
-
-type MkStorage ::  Row SlotData -> Row Type 
-type family MkStorage rt where 
-  MkStorage (R lts) = MkStorage_ lts 
-
-type MkStorage_ :: [LT (Type,Type,Type -> Type,Type -> Type)] -> Row Type  
-type family MkStorage_ lts where 
-  MkStorage_ '[] = Empty 
-  MkStorage_ (l :-> '(r,i,q,m) ': lts) = Extend l (M.Map i (Entity r m q)) (MkStorage_ lts)
-
-
-type ChildC :: Symbol -> Type -> Type -> (Type -> Type) -> (Type -> Type) -> Row SlotData -> Constraint 
-type family ChildC childLabel index rendered q m slots where 
-  ChildC lbl i r q m slots = (HasType lbl (M.Map i (Entity r m q)) (MkStorage slots)
-                             ,HasType lbl (M.Map i r) (MkRenderTree slots)
-                             ,SlotConstraint slots
-                             ,KnownSymbol lbl)
-
-type StorageConstraint :: Row SlotData -> Constraint 
-type family StorageConstraint slots where 
-  StorageConstraint slots =  ( Forall slots SlotOrdC 
-                             , Forall (MkStorage slots) Default
-                             , WellBehaved slots
-                             , WellBehaved (MkStorage slots)) 
-
-type RenderConstraint :: Row SlotData -> Constraint 
-type family RenderConstraint slots where 
-  RenderConstraint slots = (Forall slots SlotOrdC 
-                           ,Forall (MkRenderTree slots) Default 
-                           ,WellBehaved slots 
-                           ,WellBehaved (MkRenderTree slots))
-
-type MkRenderTree :: Row SlotData -> Row Type 
-type family MkRenderTree slots where 
-  MkRenderTree (R lts) = MkRenderTree_ lts 
-
-type MkRenderTree_ :: [LT (Type,Type,Type -> Type,Type -> Type)] -> Row Type 
-type family MkRenderTree_ slots where
-  MkRenderTree_ '[] = Empty 
-  MkRenderTree_ (l :-> '(r,i,q,m) ': lts) = Extend l (M.Map i r) (MkRenderTree_ lts)
-
-type SlotConstraint slots = (StorageConstraint slots, RenderConstraint slots)
-
-mkStorage :: forall slots
-           . StorageConstraint slots 
-          => Proxy slots  -> Rec (MkStorage slots)
-mkStorage proxy = R.default' @Default def
-
-mkRenderTree :: forall slots 
-              . SlotConstraint slots 
-            => Proxy slots -> Rec (MkRenderTree slots)
-mkRenderTree proxy = R.default' @Default def 
-
--- | Evaluation State. Holds the Prototype Spec, the Prototype's State, 
---   and a Context which can be read from inside the Prototype monad 
-type EvalState :: Row SlotData -> Type -> Type -> Type -> (Type -> Type) -> (Type -> Type) -> Type
-data EvalState slots rendered cxt st q m 
-  = EvalState {
-      _entity     :: Spec slots rendered cxt st q m 
-    , _state      :: st 
-    , _context    :: cxt 
-    , _storage    :: Rec (MkStorage slots)
-    , _renderTree :: Rec (MkRenderTree slots)
-  }
-
-data ExEvalState :: Type -> (Type -> Type) -> (Type -> Type) -> Type where 
-  ExEvalState :: EvalState slots rendered cxt st q  m 
-              -> ExEvalState rendered q m 
-
-withExEval :: forall q m rendered  r
-            . ExEvalState rendered q m 
-            -> (forall slots cxt st. EvalState slots rendered cxt st q m -> r)
+-- | Existenial eliminator for an ExEvalState 
+withExEval :: forall query surface  r 
+            . ExEvalState surface query 
+            -> (forall slots state. EvalState slots surface state query -> r)
             -> r 
 withExEval (ExEvalState e) f = f e 
 
-new :: forall slots cxt q m r
-        . (MonadIO m, SlotConstraint slots)
-       => Prototype slots r cxt q  m 
-       -> cxt 
-       -> m (Entity r m q ) 
-new (Prototype espec@MkSpec{..}) c  = liftIO (newTVarIO e') >>= \e -> pure $ Entity e 
+-- | Constructs an entity from a prototype
+new_ :: forall surface query 
+        . Prototype surface query 
+       -> IO (Entity surface query)  
+new_ (Prototype espec@MkSpec{..}) = newTVarIO e' >>= \eStore -> pure $  Entity eStore 
   where 
-    evalSt = initE espec c 
+    !evalSt = initE espec 
 
-    e' = mkEntity_ evalSt 
+    !e' = mkEntity_ evalSt 
 
+-- | Initializes an EvalState given a Spec 
 initE :: SlotConstraint slots 
-      => Spec slots r cxt st q m 
-      -> cxt 
-      -> EvalState slots r cxt st q m 
-initE espec@MkSpec {..} cxt  
+      => Spec slots r  st q 
+      -> EvalState slots r st q 
+initE espec@MkSpec{..} 
   = EvalState {_entity     = espec 
               ,_state      = initialState 
-              ,_context    =  cxt 
               ,_storage    = mkStorage slots
               ,_renderTree = mkRenderTree slots}  
 
-newtype Transformer r q m = Transformer {transform :: forall x. q x -> m (x,ExEvalState r q m)}
-
-type EntityStore r q  m = Store (ExEvalState r q  m) (Transformer r q m)
-
--- This is quite different from Halogen (which is the basis for all the Prototype stuff) so, quick explanation: 
--- EntityS is a TVar that holds a store comonad which spits out a *function* from the input to m newEvalState
--- This is kind of a weird construction but because StateT isn't a comonad and we need a StateT from which we can *extract* the state at any time
--- (for queries)
-newtype Entity r m q = Entity {entity :: TVar (EntityStore r q m)}
-
-mkEntity_ :: forall slots r cxt st q m
-           . Monad m =>  EvalState slots r cxt st q  m -> EntityStore r q m 
+-- | Constructs and EntityStore from an EvalState 
+mkEntity_ :: forall slots surface  st query 
+           . EvalState slots surface st query -> EntityStore surface query 
 mkEntity_ e = store go (ExEvalState e)
   where 
-    go :: ExEvalState r q m -> Transformer r q m
+    go :: ExEvalState r q -> Transformer r q 
     go ex@(ExEvalState es@EvalState {..}) = Transformer $ \qx -> do  
       let (EntityM ai) = apNT (handleQuery _entity) (Q . liftCoyoneda $ qx)
       let  st          = foldF (evalF es) ai
       ST.runStateT st ex
 
--- | Given an input type for some entity and the entity, run it, returning (maybe) some output 
-run :: forall x m q r. MonadIO m => q x -> Entity r m q -> m x
+-- don't export this
+-- | Runs an entity. For internal use only; you should use `tell` and `request` instead of this. 
+run :: forall x q r. q x -> Entity r q -> IO x
 run i (Entity tv) = do
-  e <- liftIO $ readTVarIO tv  -- reads the store from the tvar 
+  e <- readTVarIO tv  -- reads the store from the tvar 
   let f = extract e -- extract the input-output transfromer from the store 
   (x,st) <- transform f i -- apply the i-o transformer to some input 
   let newObj = withExEval st $ \x ->  mkEntity_ x  -- recreate the store comonad thingy from the new state 
-  liftIO . atomically . writeTVar tv $ newObj -- write new store thingy to tvar 
+  atomically $ writeTVar tv newObj -- write new store thingy to tvar 
   pure x 
 
-type Tell q = () -> q ()
+-- internal, don't export
+-- | Retrieves the map of the entity's children. For internal use.
+getSlot :: forall l i  r q q' slots st
+         . (ChildC l i r q' slots) 
+        => EntityM slots st q IO (M.Map i (Entity r q'))
+getSlot = EntityM . liftF $ Child (SlotBox :: SlotBox l slots q' i r) id 
 
+-- don't export 
+-- | `getSlot` but with a SlotBox (which serves as a dictionary for ChildC) instead of the ChildC constraint 
+getSlot' ::  SlotBox l slots q i r
+         -> EntityM slots  state query IO (M.Map i (Entity r q))
+getSlot' slot = EntityM . liftF $ Child slot id 
+
+-- don't export 
+-- | Like `getSlot` but for the rendered surface 
+getSurface :: forall l i r q q' m' slots st 
+            . (ChildC l i r q' slots, Functor m', MonadIO m')
+           => EntityM slots st q m' (M.Map i r)
+getSurface = EntityM . liftF $ Surface (SlotBox :: SlotBox l slots q' i r) id 
+
+-- | Construct a `Tell` query from a data constructor of a query algebra
 mkTell :: Tell q -> q ()
 mkTell q  = q ()
 
-
-tell :: forall lbl i r q m slots state context
-      . ChildC lbl i r q m slots 
+-- | `tell i q` takes an index/key for a child entity and a data constructor of that 
+--   entity's algebra, and returns a monadic action in the parent entity which 
+--   executes the query. 
+--
+--   Note: The slot label for the child entity is implicit; this requires a type application 
+--   for the label (it should *only* require one for the label). 
+-- 
+--   E.g. `tell @"childLabel" 123 MyQuery`
+tell :: forall lbl i r q' q slots state
+      . (ChildC lbl i r q' slots, Ord i)
      => i 
-     -> Tell q 
-     -> EntityM slots context state q m ()
+     -> Tell q' 
+     -> EntityM slots state q IO ()
 tell i q = do 
-  storage <- gets _
+  mySlot <- getSlot @lbl
+  case M.lookup i mySlot of  
+    Nothing -> pure () 
+    Just e  -> do 
+      lift (run (mkTell q) e)
+      _ <- renderChild @lbl i
+      pure ()
 
---tellAll :: forall m q t r. (Traversable t, MonadIO m) => Tell q -> t (Entity r m q) -> m ()
---tellAll q es = mapM_ (mkTell q) es  
+-- | `tellAll q` executes a tell query for every child entity at a given slot. 
+--   
+--    Like `tell`, this requires a type application for the child label. 
+-- 
+--    E.g. `tell @"childLabel" MyQuery` 
+tellAll :: forall lbl i r q' q slots state context
+      . (ChildC lbl i r q' slots, Ord i)
+     => Tell q' 
+     -> EntityM slots state q IO () 
+tellAll q = do 
+  mySlot <- M.keys <$> getSlot @lbl 
+  mapM_ (\i -> tell @lbl i q) mySlot
 
+-- | `request i q` takes an index/key for a child entity and a data constructor of 
+--   that entity's algebra, and returns a monadic action in the parent entity which executes the 
+--   query and returns (Maybe) the result of the query. 
+--
+--   Like `tell`, this requires a type application for the child label. 
+--   
+--   e.g. `request @"childLabel" 123 MyQuery`   
+request :: forall lbl i r q' q slots state context x
+      . (ChildC lbl i r q' slots, Ord i)
+     => i 
+     -> Request q' x  
+     -> EntityM slots state q IO (Maybe x)
+request i q = do 
+  mySlot <- getSlot @lbl  
+  case M.lookup i mySlot of 
+    Nothing -> pure Nothing 
+    Just e  -> do 
+      o <- lift (run (mkRequest q) e)
+      _ <- renderChild @lbl i 
+      pure (Just o)
 
-type Request q a = (a -> a) -> q a 
+-- | Like `tellAll` but for requests. Requires a type application for the child label.
+requestAll :: forall lbl i r q' q slots state context x
+      . (ChildC lbl i r q' slots, Ord i)
+     => Request q' x  
+     -> EntityM slots state q IO [x]
+requestAll q = do 
+  mySlot <- M.keys <$> getSlot @lbl 
+  catMaybes <$> mapM (\i -> request @lbl i q) mySlot 
 
 mkRequest :: Request q x -> q x
 mkRequest q = q id 
 
-renderE :: MonadIO m => Entity r m q -> m r 
+-- | Given an Entity, renders its surface
+renderE :: Entity surface query -> IO surface
 renderE (Entity tv) = do 
-  e <- liftIO $ readTVarIO tv
+  e <- readTVarIO tv
   case pos e of -- can't use let, something something monomorphism restriction 
-    ExEvalState EvalState{..} -> pure $ render _entity _state 
-  
+    ExEvalState EvalState{..} -> do 
+      let surface = render (renderer  _entity) _state 
+      onRender (renderer _entity) surface 
+      pure surface 
 
+evalF :: forall slots' r' st' q' a' 
+    .  EvalState slots' r' st' q'
+    -> EntityF slots' st' q' IO a'
+    -> ST.StateT (ExEvalState r' q') IO a' 
+evalF EvalState{..} = \case 
 
---requestAll :: forall r m q t x. (Traversable t, MonadIO m) => Request q x -> t (Entity r m q) -> m (t x) 
---requestAll q es = mapM (mkRequest q) es 
-
-evalF :: forall slots' r' cxt' st' q'  m' a' 
-    .  Monad m' 
-    => EvalState slots' r' cxt' st' q'  m'
-    -> EntityF slots' cxt' st' q' m' a'
-    -> ST.StateT (ExEvalState r' q' m') m' a' 
-evalF EvalState {..} = \case 
   State f -> case f _state of 
     (a,newState) -> do 
-        ST.modify $ \_ -> ExEvalState $ EvalState {_state = newState,..}
+        let newSurface = render (renderer _entity) newState 
+        ST.modify' $ \_ -> ExEvalState $ EvalState {_state = newState,..}
         pure a 
 
   Lift ma -> lift ma
 
-  Ask f   -> pure (f _context)
-
   Query q -> case apNT (handleQuery _entity) (Q q ) of 
     EntityM ef -> foldF (evalF (EvalState {..})) ef  
 
+  Child slot f -> case slot of -- need this for type inference, it's not superfluous here 
+    SlotBox -> pure . f $ _storage .! slotLabel slot
 
+  Surface slot f -> case slot of 
+    SlotBox -> pure . f $ _renderTree .! slotLabel slot 
 
+  -- GHC doesn't get as mad if we do line-by-line "imperative style" vs trying to compose everything together
+  Create slot i e' a -> case slot of 
+    SlotBox -> do 
+      e <- liftIO $ new_ e' 
+      lift (renderE e) >>= \x -> do
+          let l = slotLabel slot 
+          let oldSurface = _renderTree .! l
+          let oldSlot    = _storage    .! l
+          let newSlot    = M.insert i e oldSlot
+          let newSurface = M.insert i x oldSurface 
+          ST.modify' $ \_ -> 
+            ExEvalState $ EvalState {_storage = R.update l newSlot _storage
+                                    ,_renderTree = R.update l newSurface _renderTree
+                                    ,..} 
+          pure a 
+  
+  Delete slot i a -> case slot of 
+    SlotBox -> do 
+      let l = slotLabel slot 
+      let oldSurface = _renderTree .! l
+      let oldSlot    = _storage    .! l
+      let newSlot    = M.delete i oldSlot
+      let newSurface = M.delete i oldSurface 
+      ST.modify' $ \_ -> 
+        ExEvalState $ EvalState {_storage = R.update l newSlot _storage
+                                ,_renderTree = R.update l newSurface _renderTree 
+                                ,..}
+      pure a 
 
+  Render slot i f -> case slot of 
+    SlotBox -> do
+      let l = slotLabel slot 
+      let oldSurface = _renderTree .! l
+      let oldSlot    = _storage    .! l
+      let newSurface = M.insert i oldSurface 
+      case M.lookup i oldSlot of 
+        Nothing -> pure $ f Nothing 
+        Just e  -> do 
+          lift (renderE e) >>= \r -> do 
+              let newSurface = M.insert i r oldSurface 
+              ST.modify' $ \_ -> 
+                ExEvalState $ EvalState {_renderTree = R.update l newSurface _renderTree
+                                        ,..}
+              pure $ f (Just r)  
 
+-- | Deletes a child entity (and its rendered output in the renderTree).
+--   
+--   Requires a type application for the label 
+delete :: forall lbl i r q'  q slots state 
+      . (ChildC lbl i r q' slots, Ord i)
+     => i 
+     -> EntityM slots state q IO ()
+delete i = EntityM . liftF $ Delete (SlotBox :: SlotBox lbl slots q' i r) i () 
 
+-- | Creates a child component at the designaed label and index from the Prototype argument.
+-- 
+--   Requires a type application for the label.
+create :: forall lbl i r q' q slots state
+      . (ChildC lbl i r q' slots, Ord i, SlotConstraint slots)
+     => i
+     -> Prototype r q' 
+     -> EntityM slots state q IO ()
+create i p = EntityM . liftF $ Create (SlotBox :: SlotBox lbl slots q' i r) i p ()
 
+-- internal, don't export
+renderChild :: forall lbl i r q' q slots state m  
+      . (ChildC lbl i r q' slots, Ord i, Functor m)
+     => i
+     -> EntityM slots state q m (Maybe r)
+renderChild i = EntityM . liftF $ Render (SlotBox :: SlotBox lbl slots q' i r) i id
 
-
-
--}

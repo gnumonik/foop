@@ -26,11 +26,13 @@ source-repository head
 library
   exposed-modules:
       Data.Foop
-      Data.Foop.Entity
-      Data.Foop.EntityF
-      Data.Foop.Eval
-      Data.Foop.Connect
-      Data.Foop.DList
+      Data.Foop.Types
+      Data.Foop.Prototype
+      Data.Foop.Eval 
+      Data.Foop.Activate 
+      
+      Data.Foop.Example 
+
   other-modules:
       Paths_foop
   hs-source-dirs:
@@ -44,14 +46,11 @@ library
     , comonad
     , kan-extensions
     , row-types
-    , singletons
     , constraints
     , containers
     , data-default
-    , async
-  default-language: Haskell2010
 
-  ghc-options: -fno-cse -fno-full-laziness
+  default-language: Haskell2010
 
   default-extensions: 
       DataKinds
