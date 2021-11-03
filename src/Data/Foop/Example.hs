@@ -154,7 +154,7 @@ type CountersSlots = "counterA" .== Slot String String CounterLogic
 counters = prototype $ MkSpec {
     initialState = ()
   , handleQuery = queryHandler runCounters 
-  , renderer = mkSimpleRender show
+  , renderer = mkSimpleRender (const show)
   , slots = Proxy @CountersSlots
   }
  where

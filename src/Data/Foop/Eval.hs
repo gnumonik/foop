@@ -1,4 +1,6 @@
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE QuantifiedConstraints #-}
 module Data.Foop.Eval where
 
 import Data.Foop.Types 
@@ -14,6 +16,19 @@ import Control.Monad.Free.Church
 import Control.Comonad.Store
 import Control.Concurrent.STM
 import Data.Maybe
+import Data.Kind (Type)
+import Unsafe.Coerce
+import Data.Functor.Constant 
+import Data.Row.Internal
+import Data.Data
+import Control.Monad.Identity
+import Data.Constraint
+import GHC.TypeLits (Symbol)
+import qualified Data.Constraint.Forall as DC 
+import Data.Constraint.Unsafe 
+import Data.Bifunctor
+import Data.Row.Dictionaries
+
 
 -- | Extracts a label `l` from a `SlotBox l slots q i r`
 slotLabel :: forall slots q i r l. SlotBox l slots q i r -> Label l 
@@ -38,8 +53,8 @@ new_ (Prototype espec@MkSpec{..}) = newTVarIO e' >>= \eStore -> pure $  Entity e
 
 -- | Initializes an EvalState given a Spec 
 initE :: SlotConstraint slots 
-      => Spec slots r  st q 
-      -> EvalState slots r st q 
+      => Spec slots r st q 
+      -> EvalState slots (Node r slots) st q 
 initE espec@MkSpec{..} 
   = EvalState {_entity     = espec 
               ,_state      = initialState 
@@ -85,7 +100,7 @@ getSlot' slot = EntityM . liftF $ Child slot id
 -- | Like `getSlot` but for the rendered surface 
 getSurface :: forall l i r q q' m' slots st 
             . (ChildC l i r q' slots, Functor m', MonadIO m')
-           => EntityM slots st q m' (M.Map i r)
+           => EntityM slots st q m' (M.Map i (Rec r))
 getSurface = EntityM . liftF $ Surface (SlotBox :: SlotBox l slots q' i r) id 
 
 -- | Construct a `Tell` query from a data constructor of a query algebra
@@ -160,15 +175,16 @@ requestAll q = do
 mkRequest :: Request q x -> q x
 mkRequest q = q id 
 
--- | Given an Entity, renders its surface
-renderE :: Entity surface query -> IO surface
+-- | Given an Entity, renders its surface. Doesn't update anything, but does run the IO action.
+renderE :: forall surface children query. Entity (Node surface children) query -> IO (Rec (Node surface children))
 renderE (Entity tv) = do 
   e <- readTVarIO tv
   case pos e of -- can't use let, something something monomorphism restriction 
     ExEvalState EvalState{..} -> do 
-      let surface = render (renderer  _entity) _state 
+      let surface = render (renderer  _entity) _renderTree _state 
       onRender (renderer _entity) surface 
-      pure surface 
+      pure $   #surface  .== surface 
+           .+  #children .== _renderTree
 
 evalF :: forall slots' r' st' q' a' 
     .  EvalState slots' r' st' q'
@@ -178,7 +194,7 @@ evalF EvalState{..} = \case
 
   State f -> case f _state of 
     (a,newState) -> do 
-        let newSurface = render (renderer _entity) newState 
+        let newSurface = render (renderer _entity) _renderTree newState 
         liftIO $ onRender (renderer _entity) newSurface 
         ST.modify' $ \_ -> ExEvalState $ EvalState {_state = newState,..}
         pure a 
@@ -228,7 +244,6 @@ evalF EvalState{..} = \case
       let l = slotLabel slot 
       let oldSurface = _renderTree .! l
       let oldSlot    = _storage    .! l
-      let newSurface = M.insert i oldSurface 
       case M.lookup i oldSlot of 
         Nothing -> pure $ f Nothing 
         Just e  -> do 
@@ -238,6 +253,7 @@ evalF EvalState{..} = \case
                 ExEvalState $ EvalState {_renderTree = R.update l newSurface _renderTree
                                         ,..}
               pure $ f (Just r)  
+
 
 -- | Deletes a child entity (and its rendered output in the renderTree).
 --   
@@ -262,6 +278,23 @@ create i p = EntityM . liftF $ Create (SlotBox :: SlotBox lbl slots q' i r) i p 
 renderChild :: forall lbl i r q' q slots state m  
       . (ChildC lbl i r q' slots, Ord i, Functor m)
      => i
-     -> EntityM slots state q m (Maybe r)
+     -> EntityM slots state q m (Maybe (Rec r))
 renderChild i = EntityM . liftF $ Render (SlotBox :: SlotBox lbl slots q' i r) i id
 
+{--
+storeHas :: forall (l :: Symbol)
+                   (i :: Type)
+                   (s :: Type) 
+                   (q :: Type -> Type)
+                   (slots :: Row SlotData)
+          . HasType l (Slot i s q) slots :- HasType l (M.Map i (Entity s q)) (MkStorage slots)
+storeHas = Sub $ unsafeCoerce $ Dict @(HasType l (Slot i s q) slots)
+
+surfaceHas :: forall (l :: Symbol)
+                     (i :: Type)
+                     (s :: Type) 
+                     (q :: Type -> Type)
+                     (slots :: Row SlotData)
+            . HasType l (Slot i s q) slots :- HasType l (M.Map i s) (MkRenderTree slots)
+surfaceHas  = Sub $ unsafeCoerce $ Dict @(HasType l (Slot i s q) slots)
+--}
