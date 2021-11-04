@@ -50,6 +50,7 @@ library
     , containers
     , data-default
     , singletons
+    , lens 
 
   default-language: Haskell2010
 
