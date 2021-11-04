@@ -20,8 +20,8 @@ emptySlots :: Proxy Empty
 emptySlots = Proxy 
 
 -- | Makes a renderer that always returns (IO ()) as the side effect of rendering 
-mkSimpleRender :: (RenderTree slots -> state -> surface) 
-               -> Renderer slots state surface 
+mkSimpleRender :: (state -> surface) 
+               -> Renderer state surface 
 mkSimpleRender f = MkRenderer f (const $ pure ()) 
 
 -- | `queryHandler` takes a function of type (forall x. query x -> EntityM slots state query m)
@@ -44,8 +44,8 @@ queryHandler eval = NT go
     unCoyoneda f (Coyoneda ba fb) = f ba fb 
 
 -- | Constructs a Prototype provides the Row of Slotdata for the prototype satisfies SlotConstraint
-prototype :: -- SlotConstraint slots => 
-             Spec slots surface state query 
+prototype :: SlotConstraint slots
+          => Spec slots surface state query 
           -> Prototype surface slots query 
 prototype = Prototype 
 

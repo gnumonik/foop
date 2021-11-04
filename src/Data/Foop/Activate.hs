@@ -10,28 +10,28 @@ import Control.Comonad.Store
 
 -- | Takes a prototype and constructs a root entity, which can be queries 
 --   directly from the rest of the program.
-activate :: Prototype surface query 
-        -> IO (Object surface query)
+activate :: Prototype surface children query 
+        -> IO (Object '((),surface,RenderTree children,query))
 activate p = do 
   e@(Entity tv) <- new_ p 
   pure (Object e)
 
 -- | Run a query against a root entity.
-query :: Object surface query 
-      -> query x 
+query :: Object '((),su,cs,q)
+      -> q x 
       -> IO x 
 query (Object e) q = run q e
 
 -- | Like `tell` but for root objects
-tell' :: Tell query -> Object surface query -> IO ()
+tell' :: Tell q -> Object (Slot () s cs q) -> IO ()
 tell' q o = query o (mkTell q) 
 
 -- | Like `request` but for root objects
-request' :: Request query a -> Object surface query -> IO a 
+request' :: Request q a -> Object (Slot () s cs q) -> IO a 
 request' q o = query o (mkRequest q)
 
 -- | Render a root entity
-observe :: Object surface query -> IO surface 
+observe :: Object (Slot () s cs q) -> IO (RenderLeaf (Slot () s cs q))
 observe (Object e) = renderE e 
 
 

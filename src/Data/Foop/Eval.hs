@@ -45,23 +45,27 @@ withExEval :: forall query surface slots r
 withExEval (ExEvalState e) f = f e 
 
 -- | Constructs an entity from a prototype
-new_ :: forall surface slots query 
-        . Prototype surface slots query 
-       -> IO (Entity surface slots query)  
-new_ (Prototype espec@MkSpec{..}) = newTVarIO e' >>= \eStore -> pure $  Entity eStore 
-  where 
-    !evalSt = initE espec 
-
-    !e' = mkEntity_ evalSt 
+new_ :: forall index surface slots query 
+        . Ord index 
+       => Prototype surface slots query 
+       -> IO (Entity '(index,surface,RenderTree slots,query))  
+new_ (Prototype espec@MkSpec{..}) = do 
+    evalSt <- initE espec  
+    eStore <- newTVarIO $  mkEntity_ evalSt 
+    pure $  Entity eStore 
 
 -- | Initializes an EvalState given a Spec 
-initE ::  Spec slots r st q 
-      -> EvalState slots r st q 
+initE :: forall slots r st q 
+       . SlotConstraint slots 
+      => Spec slots r st q 
+      -> IO (EvalState slots r st q) 
 initE espec@MkSpec{..} 
-  = EvalState {_entity     = espec 
+  = pure (mkStorage slots) >>= \storage ->
+    toSurface slots storage >>= \surface -> pure $ 
+    EvalState {_entity     = espec 
               ,_state      = initialState 
-              ,_storage    = mkStorage slots
-              ,_renderTree = mkRenderTree slots}  
+              ,_storage    = storage
+              ,_renderTree = MkRenderTree surface}  
 
 -- | Constructs and EntityStore from an EvalState 
 mkEntity_ :: forall slots surface  st query 
@@ -76,7 +80,7 @@ mkEntity_ e = store go (ExEvalState e)
 
 -- don't export this
 -- | Runs an entity. For internal use only; you should use `tell` and `request` instead of this. 
-run :: forall x q s r. q x -> Entity r s q -> IO x
+run :: forall slot q x. QueryOf slot q => q x -> Entity slot -> IO x
 run i (Entity tv) = do
   e <- readTVarIO tv  -- reads the store from the tvar 
   let f = extract e -- extract the input-output transfromer from the store 
@@ -90,7 +94,7 @@ run i (Entity tv) = do
 getSlot :: forall label slots slot st q 
          . (ChildC label slots slot) 
         => EntityM slots st q IO (StorageBox slot)
-getSlot = EntityM . liftF $ Child (SlotBox :: SlotBox label slots slot)  id 
+getSlot = EntityM . liftF $ Child (SlotBox :: SlotBox label slots slot) id 
 
 -- don't export 
 -- | `getSlot` but with a SlotBox (which serves as a dictionary for ChildC) instead of the ChildC constraint 
@@ -117,18 +121,25 @@ mkTell q  = q ()
 --   for the label (it should *only* require one for the label). 
 -- 
 --   E.g. `tell @"childLabel" 123 MyQuery`
+tell :: forall label slots i su cs q state query 
+      . (ChildC label slots '(i,su,RenderTree cs,q))
+     => i
+     -> Tell q
+     -> EntityM slots state query IO ()
+tell i = tell_ @label (Indexed Index i) 
+
 tell_ :: forall label slots i su cs q state query 
       . (ChildC label slots '(i,su,RenderTree cs,q))
      => Indexed '(i,su,RenderTree cs,q)
      -> Tell q
      -> EntityM slots state query IO ()
 tell_ i q = do 
-  MkStorageBox proxy mySlot <- getSlot @label
+  MkStorageBox mySlot <- getSlot @label
   case M.lookup  i mySlot of  
     Nothing -> pure () 
     Just e  -> do 
       lift (run (mkTell q) e)
-      _ <- renderChild @label i
+      _ <- renderChild @label (unIndexed i)
       pure ()
 
 -- | `tellAll q` executes a tell query for every child entity at a given slot. 
@@ -141,7 +152,7 @@ tellAll :: forall label i su cs q slots state query
      => Tell q
      -> EntityM slots state query IO () 
 tellAll q = do 
-  MkStorageBox proxy mySlot <- getSlot @label @slots @'(i,su,RenderTree cs,q)
+  MkStorageBox mySlot <- getSlot @label @slots @'(i,su,RenderTree cs,q)
   let slotKeys = M.keys mySlot 
   mapM_ (\i -> pure (M.lookup i mySlot) >>= \case 
                 Nothing -> pure () 
@@ -154,18 +165,25 @@ tellAll q = do
 --   Like `tell`, this requires a type application for the child label. 
 --   
 --   e.g. `request @"childLabel" 123 MyQuery`   
+request :: forall label i su cs q slots state query x
+      . (ChildC label slots '(i,su,RenderTree cs,q))
+     => i
+     -> Request q x  
+     -> EntityM slots state query IO (Maybe x)
+request i = request_ @label (Indexed Index i)
+
 request_ :: forall label i su cs q slots state query x
       . (ChildC label slots '(i,su,RenderTree cs,q))
      => Indexed '(i,su,RenderTree cs,q)
      -> Request q x  
      -> EntityM slots state query IO (Maybe x)
 request_ i q = do 
-  MkStorageBox proxy mySlot <- getSlot @label 
+  MkStorageBox mySlot <- getSlot @label 
   case M.lookup i mySlot of 
     Nothing -> pure Nothing 
     Just e  -> do 
       o <- lift (run (mkRequest q) e)
-      _ <- renderChild @label i 
+      _ <- renderChild @label (unIndexed i) 
       pure (Just o)
 
 -- | Like `tellAll` but for requests. Requires a type application for the child label.
@@ -174,7 +192,7 @@ requestAll :: forall label i su cs q slots state query x
      => Request q x  
      -> EntityM slots state query IO [x]
 requestAll q = do 
-  MkStorageBox proxy mySlot <- getSlot @label
+  MkStorageBox mySlot <- getSlot @label
   let slotKeys = M.keys mySlot 
   catMaybes <$> mapM (\i -> request_ @label i q) slotKeys 
 
@@ -182,15 +200,16 @@ mkRequest :: Request q x -> q x
 mkRequest q = q id 
 
 -- | Given an Entity, renders its surface. Doesn't update anything, but does run the IO action.
-renderE :: forall index surface children query. Entity surface children query -> IO (RenderNode '(index,surface,RenderTree children,query))
+renderE :: forall i su cs q 
+         .  Entity '(i,su,RenderTree cs,q)
+         -> IO (RenderLeaf '(i,su,RenderTree cs,q))
 renderE (Entity tv) = do 
   e <- readTVarIO tv
   case pos e of -- can't use let, something something monomorphism restriction 
     ExEvalState EvalState{..} -> do 
-      let surface = render (renderer  _entity) _renderTree _state 
+      let surface = render (renderer  _entity)  _state 
       onRender (renderer _entity) surface 
-      pure $  MkRenderNode Proxy $ #surface  .== surface 
-                               .+  #children .== _renderTree
+      pure $ MkRenderLeaf surface _renderTree
 
 evalF :: forall slots' r' st' q' a' 
     .  EvalState slots' r' st' q'
@@ -200,7 +219,7 @@ evalF EvalState{..} = \case
 
   State f -> case f _state of 
     (a,newState) -> do 
-        let newSurface = render (renderer _entity) _renderTree newState 
+        let newSurface = render (renderer _entity)  newState 
         liftIO $ onRender (renderer _entity) newSurface 
         ST.modify' $ \_ -> ExEvalState $ EvalState {_state = newState,..}
         pure a 
@@ -212,60 +231,50 @@ evalF EvalState{..} = \case
 
   Child slot f ->  pure . f $ lookupStorage slot _storage 
 
-  Surface slot f -> pure . f $ lookupSurface slot _renderTree 
+  Surface slot f -> pure . f $ lookupNode slot _renderTree 
 
   -- GHC doesn't get as mad if we do line-by-line "imperative style" vs trying to compose everything together
   Create slot i e' a -> case slot of 
     SlotBox -> do 
       e <- liftIO $ new_ e' 
-      lift (renderE e) >>= \x -> do
-          let MkRenderNode proxy1 oldNode = lookupSurface slot _renderTree 
-          let MkStorageBox proxy2 oldSlot    = lookupStorage slot _storage    
-          let newSlot    = MkStorageBox proxy1 $ M.insert (Indexed Index i) e oldSlot
-          let newSurface = modifySurface slot  (over #children M.insert (Indexed Index i) x)
+      lift (renderE e) >>= \x@(MkRenderLeaf su cs) -> do
           ST.modify' $ \_ -> withDict (deriveStoreHas slot)
-            ExEvalState $ EvalState {_storage =  modifyStorage slot (const newSlot) _storage
-                                    ,_renderTree = R.update l newSurface _renderTree
+            ExEvalState $ EvalState {_storage =  modifyStorage slot (\(MkStorageBox m) -> 
+                                                      MkStorageBox  $ M.insert (Indexed Index i) e m) _storage
+                                    ,_renderTree = modifyNode slot (insertSurface i x) _renderTree 
                                     ,..} 
           pure a 
   
   Delete slot i a -> case slot of 
     SlotBox -> do 
-      let l = slotLabel slot 
-      let oldSurface = _renderTree .! l
-      let oldSlot    = _storage    .! l
-      let newSlot    = M.delete i oldSlot
-      let newSurface = M.delete i oldSurface 
       ST.modify' $ \_ -> 
-        ExEvalState $ EvalState {_storage = R.update l newSlot _storage
-                                ,_renderTree = R.update l newSurface _renderTree 
+        ExEvalState $ EvalState {_storage = modifyStorage slot (\(MkStorageBox  m) -> MkStorageBox $ M.delete (Indexed Index i) m) _storage
+                                ,_renderTree = modifyNode slot (deleteSurface i) _renderTree
                                 ,..}
       pure a 
 
   Render slot i f -> case slot of 
     SlotBox -> do
-      let l = slotLabel slot 
-      let oldSurface = _renderTree .! l
-      let oldSlot    = _storage    .! l
-      case M.lookup i oldSlot of 
+      let MkStorageBox  oldStorage = lookupStorage slot _storage  
+      -- let oldSlot    = _storage    .! l
+      case M.lookup (Indexed Index i) oldStorage of 
         Nothing -> pure $ f Nothing 
         Just e  -> do 
           lift (renderE e) >>= \r -> do 
-              let newSurface = M.insert i r oldSurface 
               ST.modify' $ \_ -> 
-                ExEvalState $ EvalState {_renderTree = R.update l newSurface _renderTree
+                ExEvalState $ EvalState {_renderTree = modifyNode slot (\(MkRenderNode  m) -> 
+                                                          MkRenderNode $ M.insert (Indexed Index i) r m) _renderTree
                                         ,..}
               pure $ f (Just r)  
-
 
 -- | Deletes a child entity (and its rendered output in the renderTree).
 --   
 --   Requires a type application for the label 
 delete :: forall label slots state i su cs q query 
-      . (ChildC label slots '(i,su,cs,q))
+      . (ChildC label slots '(i,su,RenderTree cs,q))
      => i 
      -> EntityM slots state query IO ()
-delete i = EntityM . liftF $ Delete SlotBox (Indexed Index i) () 
+delete i = EntityM . liftF $ Delete (SlotBox :: SlotBox label slots '(i,su,RenderTree cs,q)) i () 
 
 -- | Creates a child component at the designaed label and index from the Prototype argument.
 -- 
@@ -275,23 +284,17 @@ create :: forall label slots i su cs q state query
      => i
      -> Prototype su cs q
      -> EntityM slots state query IO ()
-create i p = EntityM . liftF $ Create SlotBox  i p ()
+create i p = EntityM . liftF $ Create (SlotBox :: SlotBox label slots '(i,su,RenderTree cs,q))  i p ()
 
 -- internal, don't export
 renderChild :: forall label slots i su cs q state query 
              . ChildC label slots '(i,su,RenderTree cs,q)
-     => Indexed '(i,su,RenderTree cs,q) 
-     -> EntityM slots state query IO (Maybe (RenderNode '(i,su,RenderTree cs,q)))
-renderChild i = EntityM . liftF $ Render SlotBox i id
+     => i
+     -> EntityM slots state query IO (Maybe (RenderLeaf '(i,su,RenderTree cs,q)))
+renderChild i = EntityM . liftF $ Render (SlotBox :: SlotBox label slots '(i,su,RenderTree cs,q)) i id
 
-{--
-storeHas :: forall (l :: Symbol)
-                   (slots :: Row SlotData)
-                   (slot :: SlotData)
-          . HasType l slot slots :- HasType l (StorageBox slot) (R.Map StorageBox slots)
-storeHas = Sub $ unsafeCoerce $ Dict @(HasType l slot slots)
---}
-deriveStoreHas :: forall label slots slot. SlotBox label slots slot 
+deriveStoreHas :: forall label slots slot
+                . SlotBox label slots slot 
                -> Dict (HasType label (StorageBox slot) (R.Map StorageBox slots))
 deriveStoreHas SlotBox 
   = withDict 
@@ -312,21 +315,42 @@ deriveSurfaceHas SlotBox
     (mapDict weaken1 $ mapDict (mapHas @RenderNode @label @slot @slots) (Dict @((slots .! label) ~ slot)))
     Dict 
 
-lookupSurface :: forall label slots slot 
+lookupNode :: forall label slots slot 
                . SlotBox label slots slot 
               -> RenderTree slots 
               -> RenderNode slot 
-lookupSurface key@SlotBox (MkRenderTree proxy renderTree) = withDict (deriveSurfaceHas key) $ renderTree .! (Label @label)  
+lookupNode key@SlotBox (MkRenderTree renderTree) 
+  = withDict (deriveSurfaceHas key) 
+  $ renderTree .! (Label @label)  
 
-modifySurface :: forall label slots slot 
+modifyNode :: forall label slots slot 
                . SlotBox label slots slot 
               -> (RenderNode slot -> RenderNode slot)
               -> RenderTree slots 
               -> RenderTree slots 
-modifySurface key@SlotBox f (MkRenderTree proxy renderTree)
-  =  withDict (deriveStoreHas key) 
-  $ case renderTree .! #children of 
-      nodes -> MkRenderTree proxy $ R.update (Label @label) (set #children (f $ view #children renderTree)) renderTree
+modifyNode key@SlotBox f tree@(MkRenderTree  renderTree)
+  =  withDict (deriveSurfaceHas key) 
+  $ case lookupNode key tree of 
+      oldNode -> let newNode = f oldNode 
+                     newTree = R.update (Label @label) newNode renderTree 
+                 in MkRenderTree  newTree 
+
+insertSurface :: forall i su cs q 
+               . Ord i 
+              => i 
+              -> RenderLeaf '(i,su,RenderTree cs,q)
+              -> RenderNode '(i,su,RenderTree cs,q)
+              -> RenderNode '(i,su,RenderTree cs,q)
+insertSurface i leaf@(MkRenderLeaf s r) (MkRenderNode  m)
+  = MkRenderNode $ M.insert (Indexed Index i) leaf m
+
+deleteSurface :: forall i su cs q 
+               . Ord i 
+              => i 
+              -> RenderNode '(i,su,RenderTree cs,q)
+              -> RenderNode '(i,su,RenderTree cs,q)
+deleteSurface i (MkRenderNode  m) 
+  = MkRenderNode $ M.delete (Indexed Index i) m  
 
 modifyStorage :: forall label slots slot 
                . SlotBox label slots slot 
@@ -336,19 +360,6 @@ modifyStorage :: forall label slots slot
 modifyStorage key@SlotBox f storage 
   = withDict (deriveStoreHas key) 
   $ R.update (Label @label) (f $ storage .! (Label @label)) storage 
-
-
-surfaceHas :: forall (l :: Symbol)
-                     (i :: Type)
-                     (su :: Type) 
-                     (cs :: Row SlotData)
-                     (q :: Type -> Type)
-                     (slots :: Row SlotData)
-            . HasType l (Slot i su cs q) slots :- HasType l (RenderNode (Slot i su cs q)) (R.Map RenderNode slots)
-surfaceHas  = Sub $ unsafeCoerce $ Dict @(HasType l (Slot i su cs q) slots)
---}
-
-
 
 
 mkProxy :: (AllUniqueLabels slots
@@ -368,10 +379,6 @@ type ProxyC :: (k -> Constraint) -> Type -> Constraint
 type family ProxyC c t where 
   ProxyC (c :: k -> Constraint) (Proxy (a :: k)) = c a  
 
-
-
-
-
 toStorage :: forall slots. (Forall slots SlotOrdC)
           => Proxy slots 
           -> Rec (R.Map Proxy slots)
@@ -379,26 +386,59 @@ toStorage :: forall slots. (Forall slots SlotOrdC)
 toStorage proxy = R.transform @SlotOrdC @slots @Proxy @StorageBox go  
   where 
     go :: forall slot
-        . SlotOrdC slot
-       => Proxy slot
+        . Proxy slot
        -> StorageBox slot
-    go proxy' =  MkStorageBox proxy' M.empty 
+    go proxy' =  MkStorageBox M.empty 
 
-newtype IONode (slot :: SlotData) = IONode (IO (RenderNode slot))
+newtype IONode (slot :: SlotData) = IONode {ioNode :: IO (RenderNode slot)}
+
+
+
+type Top :: k -> Constraint 
+class Top k 
+instance Top k 
 
 toSurface :: forall slots. (Forall slots SlotOrdC)
           => Proxy slots 
           -> Rec (R.Map StorageBox slots)
-          -> Rec (R.Map RenderNode slots)
-toSurface proxy = R.transform @SlotOrdC @slots @Proxy @RenderNode go 
+          -> IO (Rec (R.Map RenderNode slots))
+toSurface proxy r = R.traverseMap @SlotOrdC @IO @StorageBox @RenderNode @slots go r 
   where 
     go :: forall slot 
         . SlotOrdC slot 
        => StorageBox slot 
-       -> IONode slot 
-    go = undefined 
+       -> IO (RenderNode slot)
+    go box = toRenderNode' box  
 
+visibly :: forall (k :: SlotData) (c :: SlotData -> Type) (d :: SlotData -> Type) 
+         . SlotOrdC k 
+        => (forall i s cs q. c (Slot i s cs q) -> d (Slot i s cs q)) 
+        -> c k 
+        -> d k  
+visibly f =  unsafeCoerce f
+
+toRenderNode' :: forall slot. SlotOrdC slot =>  StorageBox slot -> IO (RenderNode slot)
+toRenderNode' box@(MkStorageBox m) = ioNode $ visibly toRenderNode box 
+
+toRenderNode ::  StorageBox '(i,su,RenderTree cs,q) 
+             -> IONode '(i,su,RenderTree cs,q)
+toRenderNode (MkStorageBox  m) = IONode $ do 
+  rm <- traverse renderE m 
+  pure $ MkRenderNode rm 
+
+bop :: Rec
+  ('R
+     '[ "slot1" ':-> StorageBox '(Int, String, RenderTree Empty, Maybe),
+        "slot2" ':-> StorageBox '(String, Int, RenderTree Empty, Maybe)])
 bop = mkStorage (Proxy @TestRow)
+
+
+bebop :: IO
+  (Rec
+     ('R
+        '[ "slot1" ':-> RenderNode '(Int, String, RenderTree Empty, Maybe),
+           "slot2" ':-> RenderNode '(String, Int, RenderTree Empty, Maybe)]))
+bebop = toSurface (Proxy @TestRow) bop  
 
 {--            
 mkNodes :: (SlotOrdC slots 
@@ -409,10 +449,8 @@ mkNodes :: (SlotOrdC slots
 -- | Constructs an empty slot storage record.
 
 
+mkStorage :: (AllUniqueLabels slots, AllUniqueLabels (Map Proxy slots),
+ Forall slots SlotOrdC, Forall (Map Proxy slots) Default) =>
+ Proxy slots -> Rec (Map StorageBox slots)
 mkStorage proxy = toStorage proxy $ mkProxy  proxy 
 
--- | Constructs an empty render tree.
-mkRenderTree :: forall slots 
-              . -- SlotConstraint slots => 
-              Proxy slots -> RenderTree slots 
-mkRenderTree proxy = undefined --  R.default' @Default def 

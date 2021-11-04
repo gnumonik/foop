@@ -9,6 +9,7 @@ import Control.Monad.State.Class ( MonadState(get), modify' )
 import Data.Row ( Empty, type (.==), type (.+) ) 
 import Data.Proxy (Proxy (Proxy)) 
 import Control.Concurrent.STM () 
+import Data.Row.Internal
 
 
 
@@ -65,16 +66,20 @@ counter = prototype $ MkSpec {
 -- that is, a top-level entity which does not have parents and against which 
 -- we can directly run queries, we might create "methods" such as these,
 -- which use request' and tell'
-printCount' :: Object surface CounterLogic -> IO ()
+
+printCount' :: Object (Slot () s cs CounterLogic) -> IO ()
 printCount' = tell' PrintCount 
 
-getCount' :: Object surface CounterLogic -> IO Int
+
+getCount' :: Object (Slot () s cs CounterLogic) -> IO Int
 getCount' = request' GetCount 
 
-tick' :: Object surface CounterLogic -> IO ()
+
+tick' :: Object (Slot () s cs CounterLogic) -> IO ()
 tick' = tell' Tick  
 
-reset' :: Object surface CounterLogic -> IO () 
+
+reset' :: Object (Slot () s cs CounterLogic) -> IO ()
 reset' = tell' Reset
 
 -- And we could use them like so: 
@@ -127,6 +132,7 @@ printCount :: (Data.Row.Internal.AllUniqueLabels (MkStorage slots),
               (MkRenderTree slots Data.Row.Internal..! lbl) ~ Data.Map.Internal.Map i r) 
           =>
 i -> EntityM slots state q IO () --}
+
 printCount i = tell i PrintCount 
 
 getCount i = request i GetCount 
@@ -147,14 +153,15 @@ data CountersLogic x where
 
   RequestCounter :: Either String Char -> Request CounterLogic a -> (Maybe a -> x) -> CountersLogic x 
 
-type CountersSlots = "counterA" .== Slot String String CounterLogic 
-                  .+ "counterB" .== Slot Char String CounterLogic 
+type CountersSlots = "counterA" .== Slot String String Empty CounterLogic 
+                  .+ "counterB" .== Slot Char String Empty CounterLogic 
 
 --mkCounters :: Prototype String CountersLogic
+
 counters = prototype $ MkSpec {
     initialState = ()
   , handleQuery = queryHandler runCounters 
-  , renderer = mkSimpleRender (const show)
+  , renderer = mkSimpleRender show
   , slots = Proxy @CountersSlots
   }
  where
@@ -176,7 +183,7 @@ counters = prototype $ MkSpec {
       either (\i -> tell @"counterA" i t) (\i -> tell @"counterB" i t) k 
       pure x  
 
-    RequestCounter k r f ->do  
+    RequestCounter k r f -> do  
       output <- either (\i -> request @"counterA" i r) (\i -> request @"counterB" i r) k 
       pure (f output) 
 

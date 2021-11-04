@@ -2,6 +2,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE TypeFamilyDependencies #-}
 {-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE RoleAnnotations #-}
 module Data.Foop.Types where
 import Data.Kind
 import GHC.TypeLits
@@ -30,6 +31,7 @@ import Data.Constraint
 -- and the child entity storage 
 type SlotData = (Type,Type,Type, Type -> Type)
 
+
 -- | Slot index surface query
 --   
 --   Typelevel tuples realllllyyyyy suck syntactically so this 
@@ -38,8 +40,6 @@ type SlotData = (Type,Type,Type, Type -> Type)
 --   to express that here. 
 type Slot :: Type -> Type -> Row SlotData -> (Type -> Type) ->  SlotData 
 type Slot index surface children query = '(index,surface,RenderTree children,query)
-
-
 
 
 
@@ -81,14 +81,14 @@ data EntityF slots  state query m a where
           -> a 
           -> EntityF slots state query m a
 
-  Delete :: SlotBox l slots slot
-         -> Indexed slot 
+  Delete :: SlotBox l slots '(i,su,RenderTree cs,q)
+         -> i
          -> a 
          -> EntityF slots state query m a
 
   Render :: SlotBox l slots '(i,su,RenderTree cs,q)
-          -> Indexed '(i,su,RenderTree cs,q)
-          -> (Maybe (RenderNode '(i,su,RenderTree cs,q)) -> a) 
+          -> i
+          -> (Maybe (RenderLeaf '(i,su,RenderTree cs,q)) -> a) 
           -> EntityF slots state query m a
 
 instance Functor m => Functor (EntityF slots state query m) where
@@ -124,32 +124,45 @@ instance MonadTrans (EntityM slots s q ) where
   lift = EntityM . liftF . Lift
 
 
-type MkNode surface children = "surface"  .== surface 
-                            .+ "children" .== RenderTree children 
+type MkNode surface children = Rec ("surface"  .== surface 
+                                  .+ "children" .== RenderTree children)
 
 type SlotKey k = ()
 
-
 type RenderTree :: Row SlotData -> Type 
-data RenderTree slots where 
-  MkRenderTree :: Proxy slots 
-               -> Rec (R.Map RenderNode slots)
+newtype RenderTree slots where 
+  MkRenderTree :: Rec (R.Map RenderNode slots)
                -> RenderTree slots 
 
-type RenderNode :: SlotData -> Type 
-data RenderNode slotData where 
-  MkRenderNode :: Ord index 
-         => Proxy (Slot index surface children query)
-         -> Rec (MkNode surface children)
-         -> RenderNode (Slot index surface children query)
+instance Show (Rec (R.Map RenderNode slots)) => Show (RenderTree slots) where 
+  show (MkRenderTree m) = "MkRenderTree " <> show m
 
+type RenderNode :: SlotData -> Type 
+newtype RenderNode slot where 
+  MkRenderNode :: M.Map (Indexed slot) (RenderLeaf slot) 
+               -> RenderNode slot 
+
+instance Show (M.Map (Indexed slot) (RenderLeaf slot)) => Show (RenderNode slot) where 
+  show (MkRenderNode slot) = "MkRenderNode " <> show slot 
+
+
+type RenderLeaf :: SlotData -> Type 
+data RenderLeaf slot where 
+  MkRenderLeaf :: forall surface children i q
+               . surface 
+              -> RenderTree children 
+              -> RenderLeaf '(i,surface,RenderTree children,q)
+
+instance (Show surface, Show (RenderTree children)) => Show (RenderLeaf (Slot i surface children q)) where 
+  show (MkRenderLeaf su cs) = "MkRenderLeaf " <> show su <> show cs 
+  
 -- | `Prototype` is an existential wrapper for `Spec` which hides 
 --   the spec's state and slot types. Only the surface (i.e. the type which the state renders to)
 --   and the query algebra are exposed.
 data Prototype :: Type -> Row SlotData -> (Type -> Type) -> Type where
-  Prototype :: --SlotConstraint children  => 
-               Spec children surface  state query
-            -> Prototype surface children query
+  Prototype :: SlotConstraint slots 
+            => Spec slots surface  state query
+            -> Prototype surface slots query
 
 -- | `~>` is a type synonym for natural transformations (generally between functors
 --   but that constraint can't be expressed here).
@@ -166,12 +179,12 @@ data NT :: (Type -> Type) -> (Type -> Type) -> Type where
 -- | Infix synonym for `NT`
 type (:~>) m n = NT m n
 
-type Renderer :: Row SlotData -> Type -> Type -> Type 
-data Renderer slots state surface where 
+type Renderer :: Type -> Type -> Type 
+data Renderer  state surface where 
   MkRenderer :: {
-    render    :: MkRender slots -> state -> surface 
+    render    :: state -> surface 
   , onRender  :: surface -> IO ()
-  } -> Renderer slots state surface 
+  } -> Renderer state surface 
 
 -- | A `Spec` is the GADT from which an Entity is constructed. 
 type Spec :: Row SlotData -> Type -> Type -> (Type -> Type) -> Type
@@ -181,7 +194,7 @@ data Spec slots surface state query  where
     WellBehaved slots) => 
     { initialState   :: state -- For existential-ey reasons this has to be a function
     , handleQuery    :: AlgebraQ query :~> EntityM slots state query IO
-    , renderer       :: Renderer slots state surface 
+    , renderer       :: Renderer state surface 
     , slots          :: Proxy slots
     } -> Spec slots surface state query
 
@@ -198,7 +211,7 @@ data EvalState slots surface  st q where
       _entity     :: Spec slots surface st q
     , _state      :: st
     , _storage    :: Rec (MkStorage slots)
-    , _renderTree :: MkRender slots
+    , _renderTree :: RenderTree slots
   } -> EvalState slots surface st q 
 
 -- | Existential wrapper over the EvalState record. 
@@ -233,8 +246,10 @@ type EntityStore surface children query = Store (ExEvalState surface children qu
 -- | `Entity surface query` is a newtype wrapper over `TVar (EntityStore surface query)`
 --  
 --   Mainly for making type signatures easier.
-type Entity :: Type -> Row SlotData -> (Type -> Type) -> Type 
-newtype Entity surface children query = Entity {entity :: TVar (EntityStore surface children query)}
+type Entity :: SlotData -> Type 
+data Entity slot where 
+  Entity :: SlotOrdC '(i,su,RenderTree cs,q) 
+         => TVar (EntityStore su cs q) -> Entity '(i,su,RenderTree cs,q)
 
 -- | `Tell query` ==  `() -> query ()` 
 type Tell query = () -> query ()
@@ -243,24 +258,31 @@ type Tell query = () -> query ()
 type Request query a = (a -> a) -> query a 
 
 -- don't export the constructor 
+
 -- | `Object surface query` == `Object (Entity surface query)`
 --
 --   This is a wrapper for a "root" Entity (i.e an Entity which is not the child of any other)
-type Object :: Type -> Row SlotData -> (Type -> Type) -> Type
-newtype Object surface children query = Object (Entity surface children query)
+type Object :: SlotData -> Type
+data Object slot where 
+   Object :: Entity '((),su,cs,q) -> Object '((),su,cs,q)
 
 ---------------------------
 -- Families and constraints 
 ---------------------------
 
-
-
 type IndexOf :: SlotData -> Type
 type family IndexOf slotData where 
   IndexOf '(i,s,cs,q) = i
 
+unIndexed :: Indexed '(i,su,cs,q)
+          -> i 
+unIndexed (Indexed Index i) = i 
+
 data Index :: SlotData -> Type -> Type where 
   Index :: Ord i => Index '(i,s,cs,q) i 
+
+instance Show i => Show (Indexed (Slot i s cs q)) where 
+  show (Indexed Index i) = show i 
 
 data Indexed :: SlotData ->  Type where 
   Indexed :: Index slot i -> i -> Indexed slot  
@@ -275,27 +297,38 @@ type Index' :: SlotData -> Type
 type family Index' slotData where 
   Index' '(i,s,cs,q) = Index '(i,s,cs,q) i
 
-type Entity' :: SlotData -> Type -> Row SlotData -> (Type -> Type) -> Type 
-data Entity' slot' s cs q where 
-  Entity' :: Proxy '(i,s,RenderTree cs,q) -> Entity s cs q -> Entity'  '(i,s,RenderTree cs,q) s cs q 
+type QueryOf_ :: SlotData -> (Type -> Type) 
+type family QueryOf_ slot where 
+  QueryOf_ '(i,su,cs,q) = q 
+
+-- we have to "existentially hide" (that's not really what's going on)
+class QueryOf_ slot  ~ q => QueryOf (slot :: SlotData) (q :: Type -> Type)
+instance QueryOf_ slot ~ q => QueryOf slot q 
+
+type SurfaceOf_ :: SlotData -> Type 
+type family SurfaceOf_ slot where 
+  SurfaceOf_ '(i,su,cs,q) = su 
+
+class SurfaceOf_ slot ~ su    => SurfaceOf slot su 
+instance SurfaceOf_ slot ~ su => SurfaceOf slot su 
+
+type ChildrenOf_ :: SlotData -> Type 
+type family ChildrenOf_ slot where 
+  ChildrenOf_ '(i,su,RenderTree cs,q) = RenderTree cs 
+
+-- this one's different, if shit breaks that's why
+class ChildrenOf_ slot ~ RenderTree cs => ChildrenOf slot cs 
+instance ChildrenOf_ slot ~ RenderTree cs => ChildrenOf slot cs 
 
 
-type MkEntity :: SlotData -> Type 
-type family MkEntity slotData where 
-  MkEntity '(i,su,RenderTree cs,q) = Entity su cs q 
 -- | The first argument to SlotData must satisfy an Ord constraint
-
-
-
-
 type ChildStorage :: Row SlotData -> Type
 type ChildStorage slots = Rec (MkStorage slots)
 
-data StorageBox :: SlotData -> Type where 
-  MkStorageBox :: -- SlotDataC slot => 
-                  Proxy slot
-               -> M.Map (Indexed slot) (MkEntity slot) 
-               -> StorageBox slot 
+
+newtype StorageBox :: SlotData -> Type where 
+  MkStorageBox :: M.Map (Indexed slot) (Entity slot) 
+               -> StorageBox slot
 
 -- | Constructs a storage record from a row of slotdata.
 type MkStorage :: Row SlotData -> Row Type
@@ -304,6 +337,7 @@ type family MkStorage slotData  where
 
 type family SlotC (slot :: SlotData) :: Constraint where 
   SlotC '(i,s,RenderTree cs,q) = Ord i 
+
 
 class SlotC slot => SlotOrdC slot 
 instance SlotC slot => SlotOrdC slot 
@@ -317,25 +351,16 @@ type family ChildC label slots slot where
         , Forall slots SlotOrdC
         , SlotOrdC slot 
         , KnownSymbol label)
-{--
-type StorageConstraint :: Row SlotData -> Constraint
-type family StorageConstraint slots where
-  StorageConstraint slots =  ( Forall slots SlotOrdC
-                             , Forall (MkStorage slots) Default
-                             , WellBehaved (MkStorage slots))
 
-type RenderConstraint :: Row SlotData -> Constraint
-type family RenderConstraint slots where
-  RenderConstraint slots = ( Forall slots SlotOrdC
-                           , Forall (MkRender slots) Default
-                           , WellBehaved slots
-                           , WellBehaved (MkRender slots))
---}
 
 type MkRender :: Row SlotData -> Type
 type family MkRender slots where
   MkRender slots = RenderTree slots 
 
 
-type SlotConstraint slots = () --(StorageConstraint slots, RenderConstraint slots)
+type SlotConstraint slots = ( Forall slots SlotOrdC 
+                            , WellBehaved slots 
+                            , AllUniqueLabels (R.Map Proxy slots)
+                            , Forall (R.Map Proxy slots) Default)
+
 
