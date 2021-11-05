@@ -10,6 +10,7 @@ import Data.Row ( Empty, type (.==), type (.+) )
 import Data.Proxy (Proxy (Proxy)) 
 import Control.Concurrent.STM () 
 import Data.Row.Internal
+import Data.Default
 
 
 
@@ -42,8 +43,10 @@ returning x m = m >> pure x
 --   Note that GHC can infer the types here. 
 
 -- counter :: Prototype String CounterLogic 
-counter = prototype $ MkSpec {
-    initialState = 0
+
+counter :: forall context. (SlotOrdC context) => Spec Empty String Int CounterLogic context
+counter =  MkSpec {
+    initialState = 0 :: Int
   , handleQuery  = queryHandler runCounterLogic 
   , renderer     = mkSimpleRender show  -- this is a function from the component's state to its surface
   , slots        = emptySlots 
@@ -159,8 +162,8 @@ type CountersSlots = "counterA" .== Slot String String Empty CounterLogic
 
 --mkCounters :: Prototype String CountersLogic
 
-counters :: Prototype String CountersSlots CountersLogic
-counters = prototype $ MkSpec {
+
+counters = mkModel $ \_ ->  MkSpec {
     initialState = ()
   , handleQuery = queryHandler runCounters 
   , renderer = mkSimpleRender show

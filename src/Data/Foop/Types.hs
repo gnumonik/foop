@@ -48,7 +48,7 @@ type Slot index surface children query = '(index,surface,RenderTree children,que
 --   key for operations over child entities. It shouldn't ever be necessary for 
 --   a user to manually construct this
 data SlotKey :: Symbol -> Row SlotData -> SlotData -> Type where
-  SlotKey :: ChildC label slots slot  => SlotKey label slots slot
+  SlotKey :: (ChildC label slots slot, Forall slots SlotOrdC)  => SlotKey label slots slot
 
 -- | The base functor for an entity. 
 --
@@ -59,35 +59,38 @@ data SlotKey :: Symbol -> Row SlotData -> SlotData -> Type where
 --   `query` is the ADT which represents the component's algebra 
 --
 --   `m` is the inner functor (which for now will always be IO)
-type EntityF :: Row SlotData -> Type -> (Type -> Type) -> (Type -> Type) -> Type -> Type
-data EntityF slots  state query m a where
-  State   :: (state -> (a,state)) -> EntityF slots  state query m a
+type EntityF :: SlotData -> Row SlotData -> Type -> (Type -> Type) -> (Type -> Type) -> Type -> Type
+data EntityF context slots  state query m a where
+  State   :: (state -> (a,state)) -> EntityF context slots state query m a
 
-  Lift    :: m a -> EntityF slots state query m a
+  Lift    :: m a -> EntityF context slots state query m a
 
-  Query   :: Coyoneda query a -> EntityF slots state query m a
+  Context :: ({-- some kinda position thing -> --} RenderLeaf context -> a) -> EntityF context slots state query m a 
+
+  Query   :: Coyoneda query a -> EntityF context slots state query m a
 
   Child   :: SlotKey l slots slot 
           -> (StorageBox slot -> a) 
-          -> EntityF slots state query m a
+          -> EntityF context slots state query m a
 
   Create  :: SlotKey l slots '(i,su,RenderTree cs,q)
           -> i
-          -> Prototype su cs q 
+          -> Model su cs q 
           -> a 
-          -> EntityF slots state query m a
+          -> EntityF context slots state query m a
 
   Delete :: SlotKey l slots '(i,su,RenderTree cs,q)
          -> i
          -> a 
-         -> EntityF slots state query m a
+         -> EntityF context slots state query m a
 
 
 
-instance Functor m => Functor (EntityF slots state query m) where
+instance Functor m => Functor (EntityF context slots state query m) where
   fmap f = \case
     State k          -> State (first f . k)
     Lift ma          -> Lift (f <$> ma)
+    Context g        -> Context $ fmap f g 
     Query qb         -> Query $ fmap f qb
     Child key g      -> Child key $ fmap f g-- (goChild f key g)
    -- Surface key g    -> Surface key $ fmap f g
@@ -105,17 +108,20 @@ instance Functor m => Functor (EntityF slots state query m) where
 --   `query` is the ADT which represents the entity's algebra 
 --
 --   `m` is the inner functor (which for now will always be IO)
-newtype EntityM slots state query m a = EntityM (F (EntityF slots state query m) a) 
+newtype EntityM context slots state query m a = EntityM (F (EntityF context slots state query m) a) 
   deriving (Functor, Applicative, Monad)
 
-instance Functor m => MonadState s (EntityM slots s q m) where
+instance Functor m => MonadState s (EntityM context slots s q m) where
   state f = EntityM . liftF . State $ f
 
-instance  MonadIO m => MonadIO (EntityM slots s q m) where
+instance  MonadIO m => MonadIO (EntityM context slots s q m) where
   liftIO m = EntityM . liftF . Lift . liftIO $ m
 
-instance MonadTrans (EntityM slots s q ) where
+instance MonadTrans (EntityM context slots s q ) where
   lift = EntityM . liftF . Lift
+
+look :: Functor m => EntityM context slots state query m (RenderLeaf context)
+look = EntityM . liftF . Context $ id 
 
 
 type MkNode surface children = Rec ("surface"  .== surface 
@@ -151,10 +157,16 @@ instance (Show surface, Show (RenderTree children)) => Show (RenderLeaf (Slot i 
 -- | `Prototype` is an existential wrapper for `Spec` which hides 
 --   the spec's state and slot types. Only the surface (i.e. the type which the state renders to)
 --   and the query algebra are exposed.
-data Prototype :: Type -> Row SlotData -> (Type -> Type) -> Type where
-  Prototype :: SlotConstraint slots 
-            => Spec slots surface  state query
-            -> Prototype surface slots query
+data Prototype :: Type -> Row SlotData -> (Type -> Type) -> SlotData -> Type where
+  Prototype :: (SlotConstraint slots, SlotOrdC context)
+            => Spec slots surface  state query context
+            -> Prototype surface slots query context 
+
+data Model :: Type -> Row SlotData -> (Type -> Type) -> Type where 
+  Model :: forall surface slots query state 
+         . SlotConstraint slots 
+        => (forall context. SlotOrdC context => Proxy context ->  Spec slots surface state query context)
+        -> Model surface slots query  
 
 -- | `~>` is a type synonym for natural transformations (generally between functors
 --   but that constraint can't be expressed here).
@@ -179,16 +191,16 @@ data Renderer  state surface where
   } -> Renderer state surface 
 
 -- | A `Spec` is the GADT from which an Entity is constructed. 
-type Spec :: Row SlotData -> Type -> Type -> (Type -> Type) -> Type
-data Spec slots surface state query  where
+type Spec :: Row SlotData -> Type -> Type -> (Type -> Type) -> SlotData -> Type
+data Spec slots surface state query context where
   MkSpec ::
-   (--Forall slots SlotDataC,
-    WellBehaved slots) => 
+   ( SlotOrdC context 
+   , WellBehaved slots ) => 
     { initialState   :: state -- For existential-ey reasons this has to be a function
-    , handleQuery    :: AlgebraQ query :~> EntityM slots state query IO
+    , handleQuery    :: AlgebraQ query :~> EntityM context slots state query IO
     , renderer       :: Renderer state surface 
     , slots          :: Proxy slots
-    } -> Spec slots surface state query
+    } -> Spec slots surface state query context 
 
 -- | `AlgebraQ query a` is a wrapper around a type which records a query algebra. 
 --   
@@ -197,25 +209,26 @@ newtype AlgebraQ query a =  Q (Coyoneda query a)
 
 -- | Evaluation State. Holds the Prototype Spec, the Prototype's State, 
 --   and a Context which can be read from inside the Prototype monad 
-type EvalState :: Row SlotData -> Type -> Type -> (Type -> Type) -> Type
-data EvalState slots surface  st q where 
-  EvalState :: {
-      _entity     :: Spec slots surface st q
+type EvalState :: SlotData -> Row SlotData -> Type -> Type -> (Type -> Type) -> Type
+data EvalState context slots surface st q where 
+  EvalState :: SlotOrdC context => {
+      _entity     :: Spec slots surface st q context
     , _state      :: st
     , _storage    :: Rec (MkStorage slots)
     , _surface    :: surface 
-  } -> EvalState slots surface st q 
+    , _context    :: TVar (RenderLeaf context)
+  } -> EvalState context slots surface st q 
 
 -- | Existential wrapper over the EvalState record. 
-data ExEvalState :: Type -> Row SlotData -> (Type -> Type) -> Type where
-  ExEvalState :: EvalState slots surface st q
-              -> ExEvalState surface slots  q
+data ExEvalState :: SlotData -> Type -> Row SlotData -> (Type -> Type) -> Type where
+  ExEvalState :: EvalState context slots surface st q
+              -> ExEvalState context surface slots  q
 
 -- | `Transformer surface query` is a newtype wrapper over `forall x. query x -> IO (x,ExEvalState surface query)`
 --  
 --   This mainly serves to make reasoning about the EntityStore comonad less painful, and to 
 --   make type signatures far more readable. 
-newtype Transformer surface slots query = Transformer {transform :: forall x. query x -> IO (x,ExEvalState surface slots query)}
+newtype Transformer context surface slots query = Transformer {transform :: forall x. query x -> IO (x,ExEvalState context surface slots query)}
 
 -- | `EntityStore surface query` == `Store (ExEvalState surface query) (Transformer surface query)`
 -- 
@@ -232,8 +245,8 @@ newtype Transformer surface slots query = Transformer {transform :: forall x. qu
 --   functionality *combined* with comonad-functionality: We can extract the state. 
 -- 
 --   But mainly this is what it is because Store is my favorite comonad and I jump at any chance to use it :) 
-type EntityStore :: Type -> Row SlotData -> (Type -> Type) -> Type 
-type EntityStore surface children query = Store (ExEvalState surface children query) (Transformer surface children query)
+type EntityStore :: SlotData -> Type -> Row SlotData -> (Type -> Type) -> Type 
+type EntityStore context surface children query = Store (ExEvalState context surface children query) (Transformer context surface children query)
 
 -- | `Entity surface query` is a newtype wrapper over `TVar (EntityStore surface query)`
 --  
@@ -241,7 +254,7 @@ type EntityStore surface children query = Store (ExEvalState surface children qu
 type Entity :: SlotData -> Type 
 data Entity slot where 
   Entity :: SlotOrdC '(i,su,RenderTree cs,q) 
-         => TVar (EntityStore su cs q) -> Entity '(i,su,RenderTree cs,q)
+         => TVar (EntityStore context su cs q) -> Entity '(i,su,RenderTree cs,q)
 
 -- | `Tell query` ==  `() -> query ()` 
 type Tell query = () -> query ()
@@ -332,7 +345,7 @@ type family SlotC (slot :: SlotData) :: Constraint where
 class (SlotC slot, Ord (IndexOf slot))  => SlotOrdC slot where 
   slotOrd :: Dict (Ord (IndexOf slot))
   slotOrd = Dict 
-  
+
 instance (SlotC slot, Ord (IndexOf slot)) => SlotOrdC slot 
 
 -- | Compound constraint which a child entity must satisfy. You should probably just look at the source.

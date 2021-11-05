@@ -134,6 +134,15 @@ toRenderBranch (MkStorageBox  m) = IONode $ do
 
 bop = mkStorage (Proxy @TestRow)
 
+mkRenderTree :: ( AllUniqueLabels slots
+                , AllUniqueLabels (R.Map Proxy slots)
+                , Forall slots SlotOrdC
+                , Forall (R.Map Proxy slots) Default
+                , R.Map RenderBranch slots1 ~ R.Map RenderBranch slots2
+                ) => Proxy slots 
+                  -> IO (RenderTree slots)
+mkRenderTree proxy = MkRenderTree <$> atomically (toSurface proxy (mkStorage proxy))
+
 bebop :: RenderTree TestRow 
 bebop = undefined -- MkRenderTree $ unsafePerformIO . atomically $ toSurface (Proxy @TestRow) bop
 
@@ -145,7 +154,7 @@ mkStorage proxy = toStorage proxy $ mkProxy  proxy
 nodes :: forall slots. RenderTree slots -> Rec (R.Map RenderBranch slots)
 nodes = coerce
 
-type NodeC label slots slot = (HasType label slot slots, SlotOrdC slot, ChildC label slots slot)
+type NodeC label slots slot = (HasType label slot slots, SlotOrdC slot, ChildC label slots slot, SlotConstraint slots)
 
 branch :: forall label slots slot
       . NodeC label slots slot 

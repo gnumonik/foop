@@ -8,14 +8,22 @@ import Control.Monad.IO.Class
 import Data.Foop.Eval
 import Control.Comonad.Store
 import Data.Foop.Slot
+import Data.Proxy
 
 -- | Takes a prototype and constructs a root entity, which can be queries 
 --   directly from the rest of the program.
-activate :: Prototype surface children query 
-        -> IO (Object '((),surface,RenderTree children,query))
-activate p = do 
-  e@(Entity tv) <- new_ p 
-  pure (Object e)
+activate :: forall surface children query 
+          . SlotOrdC (Slot () surface children query)
+         => Model surface children query 
+         -> IO (Object (Slot () surface children query))
+activate (Model p) = case p $ Proxy @(Slot () surface children query) of 
+  espec@MkSpec{..} -> do 
+      let storage = mkStorage (Proxy @children)
+      (renderTree :: RenderTree children) <- atomically $ MkRenderTree <$> toSurface (Proxy @children) storage
+      let rendered = render renderer initialState
+      (leaf :: TVar (RenderLeaf (Slot () surface children query))) <- newTVarIO (MkRenderLeaf rendered renderTree) 
+      e@(Entity tv) <- new_' storage rendered renderTree leaf (Model p)
+      pure $ Object e 
 
 -- | Run a query against a root entity.
 query :: Object '((),su,cs,q)

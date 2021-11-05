@@ -26,13 +26,13 @@ mkSimpleRender f = MkRenderer f (const $ pure ())
 
 -- | `queryHandler` takes a function of type (forall x. query x -> EntityM slots state query m)
 --   and packages it into a boxed natural transformation. 
-queryHandler :: forall slots state query m 
+queryHandler :: forall context slots state query m 
         . Functor m
-       => (query ~> EntityM slots state query m)
-       -> (AlgebraQ query :~> EntityM slots state query m)
+       => (query ~> EntityM context slots state query m)
+       -> (AlgebraQ query :~> EntityM context slots state query m)
 queryHandler eval = NT go 
   where 
-    go :: forall x. AlgebraQ query x -> EntityM slots state query m x
+    go :: forall x. AlgebraQ query x -> EntityM context slots state query m x
     go (Q q) = unCoyoneda (\g -> fmap  g . eval) q
 
     unCoyoneda :: forall (q :: Type -> Type) 
@@ -44,11 +44,18 @@ queryHandler eval = NT go
     unCoyoneda f (Coyoneda ba fb) = f ba fb 
 
 -- | Constructs a Prototype provides the Row of Slotdata for the prototype satisfies SlotConstraint
-prototype :: SlotConstraint slots
-          => Spec slots surface state query 
-          -> Prototype surface slots query 
+prototype :: forall slots surface query state context
+           . (SlotConstraint slots, SlotOrdC context)
+          => Spec slots surface state query context
+          -> Prototype surface slots query context
 prototype = Prototype 
 
+
+mkModel :: forall surface slots query 
+         . SlotConstraint slots 
+        => (forall (context :: SlotData) state. SlotOrdC context => Proxy context -> Spec slots surface state query context)
+        -> Model surface slots query 
+mkModel f = Model f
 {--
 -- don't export
 mapSlots :: (Rec (MkRenderTree slots) -> Rec (MkRenderTree slots)) -> RenderNode r slots -> RenderNode r slots 
