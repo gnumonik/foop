@@ -133,6 +133,7 @@ printCount :: (Data.Row.Internal.AllUniqueLabels (MkStorage slots),
           =>
 i -> EntityM slots state q IO () --}
 
+
 printCount i = tell i PrintCount 
 
 getCount i = request i GetCount 
@@ -158,6 +159,7 @@ type CountersSlots = "counterA" .== Slot String String Empty CounterLogic
 
 --mkCounters :: Prototype String CountersLogic
 
+counters :: Prototype String CountersSlots CountersLogic
 counters = prototype $ MkSpec {
     initialState = ()
   , handleQuery = queryHandler runCounters 

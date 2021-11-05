@@ -32,7 +32,7 @@ request' q o = query o (mkRequest q)
 
 -- | Render a root entity
 observe :: Object (Slot () s cs q) -> IO (RenderLeaf (Slot () s cs q))
-observe (Object e) = renderE e 
+observe (Object e) = atomically $ observeE e 
 
 
 

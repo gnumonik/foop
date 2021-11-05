@@ -71,10 +71,6 @@ data EntityF slots  state query m a where
           -> (StorageBox slot -> a) 
           -> EntityF slots state query m a
 
-  Surface :: SlotBox l slots slot 
-          -> (RenderNode slot -> a) 
-          -> EntityF slots state query m a
-
   Create  :: SlotBox l slots '(i,su,RenderTree cs,q)
           -> i
           -> Prototype su cs q 
@@ -86,10 +82,7 @@ data EntityF slots  state query m a where
          -> a 
          -> EntityF slots state query m a
 
-  Render :: SlotBox l slots '(i,su,RenderTree cs,q)
-          -> i
-          -> (Maybe (RenderLeaf '(i,su,RenderTree cs,q)) -> a) 
-          -> EntityF slots state query m a
+
 
 instance Functor m => Functor (EntityF slots state query m) where
   fmap f = \case
@@ -97,10 +90,10 @@ instance Functor m => Functor (EntityF slots state query m) where
     Lift ma          -> Lift (f <$> ma)
     Query qb         -> Query $ fmap f qb
     Child key g      -> Child key $ fmap f g-- (goChild f key g)
-    Surface key g    -> Surface key $ fmap f g
+   -- Surface key g    -> Surface key $ fmap f g
     Create key i e a -> Create key i e (f a)
     Delete key i a   -> Delete key i (f a)
-    Render key i g   -> Render key i (fmap f g)
+
 
 -- | `EntityM` is the newtype wrapper over the (church-encoded) free monad
 --   formed from the `EntityF` functor. 
@@ -126,8 +119,6 @@ instance MonadTrans (EntityM slots s q ) where
 
 type MkNode surface children = Rec ("surface"  .== surface 
                                   .+ "children" .== RenderTree children)
-
-type SlotKey k = ()
 
 type RenderTree :: Row SlotData -> Type 
 newtype RenderTree slots where 
@@ -211,7 +202,7 @@ data EvalState slots surface  st q where
       _entity     :: Spec slots surface st q
     , _state      :: st
     , _storage    :: Rec (MkStorage slots)
-    , _renderTree :: RenderTree slots
+    , _surface    :: surface 
   } -> EvalState slots surface st q 
 
 -- | Existential wrapper over the EvalState record. 
@@ -336,7 +327,7 @@ type family MkStorage slotData  where
   MkStorage slotData = R.Map StorageBox slotData 
 
 type family SlotC (slot :: SlotData) :: Constraint where 
-  SlotC '(i,s,RenderTree cs,q) = Ord i 
+  SlotC '(i,s,RenderTree cs,q) = (Ord i, Forall cs SlotOrdC)
 
 
 class SlotC slot => SlotOrdC slot 
