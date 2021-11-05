@@ -49,29 +49,28 @@ withExEval :: forall query surface slots context r
 withExEval (ExEvalState e) f = f e
 
 -- | Constructs an entity from a model
-new_ :: forall index surface slots query context
-        . (Ord index, SlotOrdC context,Forall slots SlotOrdC)
+new_ :: forall index surface slots query context c
+        . (Ord index, SlotOrdC context,Forall slots SlotOrdC, c context)
        => TVar (RenderLeaf context) 
-       -> Model surface slots query
+       -> Model surface slots query c
        -> IO (Entity '(index,surface,RenderTree slots,query))
-new_ cxt (Model p) = case p (Proxy @context )of 
+new_ cxt (Model p) = case p   of 
   espec@MkSpec{..} -> do
     let evalSt = initE cxt espec
     eStore <- newTVarIO $  mkEntity_ evalSt
     pure $  Entity eStore
 
 -- | Constructs an entity from a model
-new_' :: forall index surface slots query context
+new_' :: forall index surface slots query context state 
         . (Ord index, SlotOrdC context, Forall slots SlotOrdC)
-       => Rec (MkStorage slots) 
+       => Spec slots surface state query context 
+       -> Rec (MkStorage slots) 
        -> surface 
        -> RenderTree slots 
        -> TVar (RenderLeaf context) 
-       -> Model surface slots query
        -> IO (Entity '(index,surface,RenderTree slots,query))
-new_' storage surface tree cxt (Model p) = case p (Proxy @context) of 
-  espec@MkSpec{..} -> do
-    let evalSt = EvalState {_entity  = espec 
+new_' spec@MkSpec{..} storage surface tree cxt  =  do
+    let evalSt = EvalState {_entity  = spec 
                            ,_state   = initialState 
                            ,_storage = storage 
                            ,_surface = surface 
@@ -81,9 +80,9 @@ new_' storage surface tree cxt (Model p) = case p (Proxy @context) of
 
 -- | Initializes an EvalState given a Spec 
 initE :: forall slots r st q cxt
-       . SlotConstraint slots
+       . (SlotConstraint slots,SlotOrdC cxt)
       => TVar (RenderLeaf cxt) 
-      -> (Spec slots r st q cxt)
+      -> Spec slots r st q cxt
       -> EvalState cxt slots r st q 
 initE cxt espec@MkSpec{..}
   =
@@ -277,10 +276,10 @@ delete i = EntityM . liftF $ Delete (SlotKey :: SlotKey label slots '(i,su,Rende
 -- | Creates a child component at the designaed label and index from the Prototype argument.
 -- 
 --   Requires a type application for the label.
-create :: forall label slots i su cs q state query cxt
-      . (ChildC label slots '(i,su,RenderTree cs,q))
+create :: forall label slots i su cs q state query cxt c
+      . (ChildC label slots '(i,su,RenderTree cs,q), c cxt)
      => i
-     -> Model su cs q
+     -> Model su cs q c
      -> EntityM cxt slots state query IO ()
 create i p = EntityM . liftF $ Create (SlotKey :: SlotKey label slots '(i,su,RenderTree cs,q))  i p ()
 

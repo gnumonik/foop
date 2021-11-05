@@ -1,4 +1,5 @@
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ConstraintKinds #-}
 module Data.Foop.Activate where
 
 import Data.Foop.Types
@@ -12,17 +13,17 @@ import Data.Proxy
 
 -- | Takes a prototype and constructs a root entity, which can be queries 
 --   directly from the rest of the program.
-activate :: forall surface children query 
-          . SlotOrdC (Slot () surface children query)
-         => Model surface children query 
+activate :: forall surface children query c
+          . (SlotOrdC (Slot () surface children query), c (Slot () surface children query))
+         => Model surface children query c
          -> IO (Object (Slot () surface children query))
-activate (Model p) = case p $ Proxy @(Slot () surface children query) of 
+activate (Model p) = case p @(Slot () surface children query) of 
   espec@MkSpec{..} -> do 
       let storage = mkStorage (Proxy @children)
       (renderTree :: RenderTree children) <- atomically $ MkRenderTree <$> toSurface (Proxy @children) storage
       let rendered = render renderer initialState
       (leaf :: TVar (RenderLeaf (Slot () surface children query))) <- newTVarIO (MkRenderLeaf rendered renderTree) 
-      e@(Entity tv) <- new_' storage rendered renderTree leaf (Model p)
+      e@(Entity tv) <- new_' espec storage rendered renderTree leaf  
       pure $ Object e 
 
 -- | Run a query against a root entity.

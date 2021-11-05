@@ -1,3 +1,4 @@
+{-# LANGUAGE ConstraintKinds #-}
 module Data.Foop.Prototype where
 
 
@@ -51,11 +52,13 @@ prototype :: forall slots surface query state context
 prototype = Prototype 
 
 
-mkModel :: forall surface slots query 
-         . SlotConstraint slots 
-        => (forall (context :: SlotData) state. SlotOrdC context => Proxy context -> Spec slots surface state query context)
-        -> Model surface slots query 
-mkModel f = Model f
+{--
+mkModel :: forall surface slots query (c :: SlotData -> Constraint ) state  
+         . (SlotConstraint slots )
+        =>  Proxy state -> (forall context. c context => Spec slots surface state query context)
+        -> Model surface slots query c
+mkModel proxy f = Model f 
+--}
 {--
 -- don't export
 mapSlots :: (Rec (MkRenderTree slots) -> Rec (MkRenderTree slots)) -> RenderNode r slots -> RenderNode r slots 

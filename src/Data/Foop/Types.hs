@@ -73,9 +73,10 @@ data EntityF context slots  state query m a where
           -> (StorageBox slot -> a) 
           -> EntityF context slots state query m a
 
-  Create  :: SlotKey l slots '(i,su,RenderTree cs,q)
+  Create  :: c context 
+          => SlotKey l slots '(i,su,RenderTree cs,q)
           -> i
-          -> Model su cs q 
+          -> Model su cs q c
           -> a 
           -> EntityF context slots state query m a
 
@@ -162,11 +163,11 @@ data Prototype :: Type -> Row SlotData -> (Type -> Type) -> SlotData -> Type whe
             => Spec slots surface  state query context
             -> Prototype surface slots query context 
 
-data Model :: Type -> Row SlotData -> (Type -> Type) -> Type where 
-  Model :: forall surface slots query state 
-         . SlotConstraint slots 
-        => (forall context. SlotOrdC context => Proxy context ->  Spec slots surface state query context)
-        -> Model surface slots query  
+data Model :: Type -> Row SlotData -> (Type -> Type) -> (SlotData -> Constraint) -> Type where 
+  Model :: forall surface slots query state (c :: SlotData -> Constraint) 
+         . (SlotConstraint slots)
+        =>  (forall context. c context => Spec slots surface state query context)
+        -> Model surface slots query c
 
 -- | `~>` is a type synonym for natural transformations (generally between functors
 --   but that constraint can't be expressed here).
@@ -194,8 +195,7 @@ data Renderer  state surface where
 type Spec :: Row SlotData -> Type -> Type -> (Type -> Type) -> SlotData -> Type
 data Spec slots surface state query context where
   MkSpec ::
-   ( SlotOrdC context 
-   , WellBehaved slots ) => 
+   ( WellBehaved slots ) => 
     { initialState   :: state -- For existential-ey reasons this has to be a function
     , handleQuery    :: AlgebraQ query :~> EntityM context slots state query IO
     , renderer       :: Renderer state surface 
@@ -367,3 +367,6 @@ type SlotConstraint slots = ( Forall slots SlotOrdC
                             , Forall (R.Map Proxy slots) Default)
 
 
+type Top :: forall k. k -> Constraint 
+class Top (a :: k)
+instance Top (a :: k)

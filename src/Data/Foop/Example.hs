@@ -44,8 +44,10 @@ returning x m = m >> pure x
 
 -- counter :: Prototype String CounterLogic 
 
-counter :: forall context. (SlotOrdC context) => Spec Empty String Int CounterLogic context
-counter =  MkSpec {
+type Model' a b c = Model a b c Top 
+
+counter :: Model' String Empty CounterLogic
+counter =  Model $ MkSpec {
     initialState = 0 :: Int
   , handleQuery  = queryHandler runCounterLogic 
   , renderer     = mkSimpleRender show  -- this is a function from the component's state to its surface
@@ -163,7 +165,8 @@ type CountersSlots = "counterA" .== Slot String String Empty CounterLogic
 --mkCounters :: Prototype String CountersLogic
 
 
-counters = mkModel $ \_ ->  MkSpec {
+counters :: Model String CountersSlots CountersLogic Top 
+counters = Model $  MkSpec {
     initialState = ()
   , handleQuery = queryHandler runCounters 
   , renderer = mkSimpleRender show

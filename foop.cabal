@@ -50,8 +50,8 @@ library
     , constraints
     , containers
     , data-default
-    , singletons
     , lens 
+    , zippers
 
   default-language: Haskell2010
 
