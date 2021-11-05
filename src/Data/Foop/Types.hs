@@ -47,8 +47,8 @@ type Slot index surface children query = '(index,surface,RenderTree children,que
 -- | GADT which records the necessary Slot Data and functions as a kind of 
 --   key for operations over child entities. It shouldn't ever be necessary for 
 --   a user to manually construct this
-data SlotBox :: Symbol -> Row SlotData -> SlotData -> Type where
-  SlotBox :: ChildC label slots slot  => SlotBox label slots slot
+data SlotKey :: Symbol -> Row SlotData -> SlotData -> Type where
+  SlotKey :: ChildC label slots slot  => SlotKey label slots slot
 
 -- | The base functor for an entity. 
 --
@@ -67,17 +67,17 @@ data EntityF slots  state query m a where
 
   Query   :: Coyoneda query a -> EntityF slots state query m a
 
-  Child   :: SlotBox l slots slot 
+  Child   :: SlotKey l slots slot 
           -> (StorageBox slot -> a) 
           -> EntityF slots state query m a
 
-  Create  :: SlotBox l slots '(i,su,RenderTree cs,q)
+  Create  :: SlotKey l slots '(i,su,RenderTree cs,q)
           -> i
           -> Prototype su cs q 
           -> a 
           -> EntityF slots state query m a
 
-  Delete :: SlotBox l slots '(i,su,RenderTree cs,q)
+  Delete :: SlotKey l slots '(i,su,RenderTree cs,q)
          -> i
          -> a 
          -> EntityF slots state query m a
@@ -105,7 +105,8 @@ instance Functor m => Functor (EntityF slots state query m) where
 --   `query` is the ADT which represents the entity's algebra 
 --
 --   `m` is the inner functor (which for now will always be IO)
-newtype EntityM slots state query m a = EntityM (F (EntityF slots state query m) a) deriving (Functor, Applicative, Monad)
+newtype EntityM slots state query m a = EntityM (F (EntityF slots state query m) a) 
+  deriving (Functor, Applicative, Monad)
 
 instance Functor m => MonadState s (EntityM slots s q m) where
   state f = EntityM . liftF . State $ f
@@ -122,19 +123,19 @@ type MkNode surface children = Rec ("surface"  .== surface
 
 type RenderTree :: Row SlotData -> Type 
 newtype RenderTree slots where 
-  MkRenderTree :: Rec (R.Map RenderNode slots)
+  MkRenderTree :: Rec (R.Map RenderBranch slots)
                -> RenderTree slots 
 
-instance Show (Rec (R.Map RenderNode slots)) => Show (RenderTree slots) where 
+instance Show (Rec (R.Map RenderBranch slots)) => Show (RenderTree slots) where 
   show (MkRenderTree m) = "MkRenderTree " <> show m
 
-type RenderNode :: SlotData -> Type 
-newtype RenderNode slot where 
-  MkRenderNode :: M.Map (Indexed slot) (RenderLeaf slot) 
-               -> RenderNode slot 
+type RenderBranch :: SlotData -> Type 
+newtype RenderBranch slot where 
+  MkRenderBranch :: M.Map (Indexed slot) (RenderLeaf slot) 
+               -> RenderBranch slot 
 
-instance Show (M.Map (Indexed slot) (RenderLeaf slot)) => Show (RenderNode slot) where 
-  show (MkRenderNode slot) = "MkRenderNode " <> show slot 
+instance Show (M.Map (Indexed slot) (RenderLeaf slot)) => Show (RenderBranch slot) where 
+  show (MkRenderBranch slot) = "MkRenderBranch " <> show slot 
 
 
 type RenderLeaf :: SlotData -> Type 
@@ -249,7 +250,6 @@ type Tell query = () -> query ()
 type Request query a = (a -> a) -> query a 
 
 -- don't export the constructor 
-
 -- | `Object surface query` == `Object (Entity surface query)`
 --
 --   This is a wrapper for a "root" Entity (i.e an Entity which is not the child of any other)
@@ -329,10 +329,11 @@ type family MkStorage slotData  where
 type family SlotC (slot :: SlotData) :: Constraint where 
   SlotC '(i,s,RenderTree cs,q) = (Ord i, Forall cs SlotOrdC)
 
-
-class SlotC slot => SlotOrdC slot 
-instance SlotC slot => SlotOrdC slot 
-
+class (SlotC slot, Ord (IndexOf slot))  => SlotOrdC slot where 
+  slotOrd :: Dict (Ord (IndexOf slot))
+  slotOrd = Dict 
+  
+instance (SlotC slot, Ord (IndexOf slot)) => SlotOrdC slot 
 
 -- | Compound constraint which a child entity must satisfy. You should probably just look at the source.
 type ChildC :: Symbol -> Row SlotData -> SlotData -> Constraint
@@ -343,11 +344,9 @@ type family ChildC label slots slot where
         , SlotOrdC slot 
         , KnownSymbol label)
 
-
 type MkRender :: Row SlotData -> Type
 type family MkRender slots where
   MkRender slots = RenderTree slots 
-
 
 type SlotConstraint slots = ( Forall slots SlotOrdC 
                             , WellBehaved slots 

@@ -30,7 +30,8 @@ library
       Data.Foop.Prototype
       Data.Foop.Eval 
       Data.Foop.Activate 
-      
+      Data.Foop.Dictionary
+      Data.Foop.Slot 
       Data.Foop.Example 
 
   other-modules:

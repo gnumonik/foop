@@ -7,6 +7,7 @@ import Data.Kind
 import Control.Monad.IO.Class
 import Data.Foop.Eval
 import Control.Comonad.Store
+import Data.Foop.Slot
 
 -- | Takes a prototype and constructs a root entity, which can be queries 
 --   directly from the rest of the program.
