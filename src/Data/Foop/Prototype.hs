@@ -18,13 +18,13 @@ import qualified Data.Constraint.Forall as DC
 explicitly :: forall k (c :: k -> Constraint) (a :: k) r 
             . (c a => r)
            -> (Dict (c a) -> r)
-explicitly f = \d@Dict -> withDict d $ f 
+explicitly f = \d@Dict -> withDict d f 
 
 mapE :: forall k (c :: k -> Constraint) (a :: k) r r'  
             . (c a => r)
            -> (r -> r')
            -> (Dict (c a) -> r')
-mapE f g = \d@Dict -> withDict d $ g f 
+mapE f g = \d@Dict -> withDict d g f 
 
 mapC :: forall k (c :: k -> Constraint) (a :: k) r r' 
       . (c a => r)

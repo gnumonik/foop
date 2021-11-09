@@ -95,7 +95,7 @@ instance Functor m => Functor (EntityF context slots state query m) where
   fmap f = \case
     State k          -> State (first f . k)
     Lift ma          -> Lift (f <$> ma)
-    Context g        -> Context $  (g . to f) 
+    Context g        -> Context (g . to f) 
     Query qb         -> Query $ fmap f qb
     Child key g      -> Child key $ fmap f g -- (goChild f key g)
     Create key i e a -> Create key i e (f a)

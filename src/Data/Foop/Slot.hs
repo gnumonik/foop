@@ -22,6 +22,7 @@ import Data.Coerce
 import Data.Row.Internal
 import GHC.TypeLits (Symbol)
 import GHC.Base (Any)
+import Control.Lens (Optic', Profunctor)
 
 -- | Given an Entity, renders its surface. Doesn't run the IO action.
 observeE :: forall slot
@@ -210,6 +211,39 @@ data T a b c
 type PathDir = Crumbs (T (Row SlotData) Symbol SlotData)
 
 
+type TraceS :: PathDir -> Type 
+type family TraceS crumbs where 
+  TraceS (old :> 'Leaf_ t) = RenderLeaf t 
+  TraceS (old :> 'Branch_ (l ':= t)) = RenderBranch t 
+  TraceS (old :> 'Down_ t) = RenderTree t 
+
+type Connect :: PathDir -> Symbol -> PathDir -> PathDir 
+type family Connect crumbs1 l crumbs2 where 
+  Connect (old :> 'Down_ cs) l ('Begin :> 'Leaf_ slot) = old :> 'Down_ cs :> 'Branch_ (l ':= slot)
+  Connect (old :> 'Down_ cs) l (left :> rest) = Connect (old :> 'Down_ cs) l left :> rest 
+
+type Connectable :: PathDir -> Symbol -> PathDir -> Constraint 
+type family Connectable p1 l p2 where 
+  Connectable (old :> 'Down_ cs) l ('Begin :> 'Leaf_ slot) = (KnownSymbol l, HasType l slot cs, SlotOrdC slot, Forall cs SlotOrdC)
+  --Connectable (old :> 'Down_ cs) l ('Begin :> 'Leaf_ (Slot i su cx q) :> 'Down_ cx) = (KnownSymbol l, HasType l (Slot i su cx q) cs, SlotOrdC (Slot i su cx q), Forall cs SlotOrdC)
+  Connectable (old :> 'Down_ cs) l (a :> b) = Connectable (old :> 'Down_ cs) l a 
+
+connect :: forall l slot cs root old new 
+         . (Connectable (old :> 'Down_ cs) l new, KnownSymbol l)
+        => Path root (old :> 'Down_ cs )
+        -> Path slot new
+        -> Path root (Connect (old :> 'Down_ cs) l new )
+connect root@(Down r) = \case 
+  Open -> Branch SlotKey root 
+
+  Leaf i path -> Leaf i $  connect @l root path 
+
+  Branch key path -> Branch key (connect @l root path)
+
+  Down path -> case path of 
+    Leaf i path' -> Down $ Leaf i (connect @l root path')
+
+    Open         -> Down $ Branch (SlotKey @l) Root 
 
 
 data Path :: SlotData -> PathDir -> Type where 
@@ -227,7 +261,7 @@ data Path :: SlotData -> PathDir -> Type where
        -> Path root (old :> 'Branch_ (l ':= Slot i su cs q))
        -> Path root ((old :> 'Branch_ (l ':= Slot i su cs q)) :> 'Leaf_ (Slot i su cs q))
 
-  Down :: forall l i su cs q old root 
+  Down :: forall i su cs q old root 
         . Path root (old :> 'Leaf_ (Slot i su cs q))
        -> Path root (old :> 'Leaf_ (Slot i su cs q) :> 'Down_ cs)
 
@@ -235,6 +269,17 @@ data Path :: SlotData -> PathDir -> Type where
 a ||> f = f a 
 infixl 1 ||>
 
+
+
+traceS :: forall i su cs q a l path. Path (Slot i su cs q) path -> RenderLeaf (Slot i su cs q) -> Maybe (TraceS path)
+traceS path root@(MkRenderLeaf su cs) = case path of 
+  b@(Branch l@SlotKey old) -> rbranch b root
+
+  d@(Down old) -> rdown d root 
+
+  l@(Leaf i old) -> rleaf l root 
+
+  Open -> Just root 
 
 
 rbranch :: forall i su cs q a l b . Path (Slot i su cs q) (a :> 'Branch_ (l ':= b)) -> RenderLeaf (Slot i su cs q) -> Maybe (RenderBranch b)

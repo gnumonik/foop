@@ -37,12 +37,13 @@ import Control.Lens.Fold
 import Data.Foop.Dictionary
 import Data.Foop.Slot
 import Unsafe.Coerce
+import Data.Functor 
 
 
 
 
 unTContext :: forall c. TBoxedContext c -> STM (BoxedContext c)
-unTContext (TBoxedContext c) = readTVar c >>= pure . BoxedContext
+unTContext (TBoxedContext c) = readTVar c <&> BoxedContext
 
 
 
@@ -244,7 +245,7 @@ apNTWithContext :: forall query surface slots state c x
               -> QHandler query c slots state  
               -> AlgebraQ query x 
               -> EntityM c slots state query IO x 
-apNTWithContext box handler qx = unboxContext box $ go
+apNTWithContext box handler qx = unboxContext box go
   where 
     go :: forall (cxt :: SlotData). Dict (c cxt) -> TVar (RenderLeaf cxt) -> EntityM c slots state query IO x
     go d@Dict tv = case instHandler @cxt handler of 
