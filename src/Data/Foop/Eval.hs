@@ -36,72 +36,95 @@ import Control.Lens.Getter
 import Control.Lens.Fold
 import Data.Foop.Dictionary
 import Data.Foop.Slot
+import Unsafe.Coerce
+
+
+
+
+unTContext :: forall c. TBoxedContext c -> STM (BoxedContext c)
+unTContext (TBoxedContext c) = readTVar c >>= pure . BoxedContext
+
+
 
 -- | Extracts a label `l` from a `SlotKey l slots q i r`
 slotLabel :: forall l slots slot . SlotKey l slots slot -> Label l
 slotLabel SlotKey = Label @l
 
 -- | Existenial eliminator for an ExEvalState 
-withExEval :: forall query surface slots context r
-            . ExEvalState context surface slots query
-            -> (forall state. EvalState context slots surface state query -> r)
+withExEval :: forall query surface slots c r
+            . DC.Forall c 
+            => ExEvalState c surface slots query
+            -> (forall state. EvalState c slots surface state query -> r)
             -> r
 withExEval (ExEvalState e) f = f e
 
 -- | Constructs an entity from a model
 new_ :: forall index surface slots query context c
-        . (Ord index, SlotOrdC context,Forall slots SlotOrdC, c context)
-       => TVar (RenderLeaf context) 
+        . (Ord index, Forall slots SlotOrdC, DC.Forall c)
+       => TBoxedContext c 
        -> Model surface slots query c
        -> IO (Entity '(index,surface,RenderTree slots,query))
-new_ cxt (Model p) = case p   of 
-  espec@MkSpec{..} -> do
+new_ cxt mdl = withModel mdl cxt go 
+ where 
+   go :: forall state cxt 
+       . c cxt 
+      => TVar (RenderLeaf cxt)
+      -> Spec slots surface state query c 
+      -> IO (Entity '(index,surface,RenderTree slots,query))
+   go = undefined 
+{-- 
+  espec -> do
     let evalSt = initE cxt espec
     eStore <- newTVarIO $  mkEntity_ evalSt
     pure $  Entity eStore
-
+--}
 -- | Constructs an entity from a model
-new_' :: forall index surface slots query context state 
-        . (Ord index, SlotOrdC context, Forall slots SlotOrdC)
-       => Spec slots surface state query context 
+new_' :: forall surface slots query c  state  
+        . (Forall slots SlotOrdC, SlotOrdC (Slot () surface slots query), c (Slot () surface slots query), DC.Forall c)
+       => Spec slots surface state query c
        -> Rec (MkStorage slots) 
        -> surface 
        -> RenderTree slots 
-       -> TVar (RenderLeaf context) 
-       -> IO (Entity '(index,surface,RenderTree slots,query))
+       -> TVar (RenderLeaf (Slot () surface slots query)) 
+       -> IO (Entity '((),surface,RenderTree slots,query))
 new_' spec@MkSpec{..} storage surface tree cxt  =  do
     let evalSt = EvalState {_entity  = spec 
                            ,_state   = initialState 
                            ,_storage = storage 
                            ,_surface = surface 
-                           ,_context = cxt }
+                           ,_context = TBoxedContext cxt }
     eStore <- newTVarIO $  mkEntity_ evalSt
     pure $  Entity eStore
 
 -- | Initializes an EvalState given a Spec 
-initE :: forall slots r st q cxt
-       . (SlotConstraint slots,SlotOrdC cxt)
-      => TVar (RenderLeaf cxt) 
-      -> Spec slots r st q cxt
-      -> EvalState cxt slots r st q 
+initE :: forall slots r st q c 
+       . (SlotConstraint slots)
+      => TBoxedContext c 
+      -> Spec slots r st q c
+      -> EvalState c slots r st q 
 initE cxt espec@MkSpec{..}
-  =
-    EvalState {_entity     = espec
+  = EvalState {_entity     = espec
               ,_state      = initialState
               ,_storage    = mkStorage slots
               ,_surface    = render renderer initialState
               ,_context    = cxt}
 
 -- | Constructs and EntityStore from an EvalState 
-mkEntity_ :: forall slots surface  st query context 
-           . EvalState context slots surface st query -> EntityStore context surface slots query
+mkEntity_ :: forall slots surface  st query c
+           . DC.Forall c
+          => EvalState c slots surface st query 
+          -> EntityStore c surface slots query
 mkEntity_ e = store go (ExEvalState e)
   where
-    go :: ExEvalState cxt r s q -> Transformer cxt r s q
-    go ex@(ExEvalState es@EvalState {..}) = Transformer $ \qx -> do
-      let (EntityM ai) = apNT (handleQuery _entity) (Q . liftCoyoneda $ qx)
-      let  st          = foldF (evalF es) ai
-      ST.runStateT st ex
+    go :: ExEvalState c surface slots query 
+       -> Transformer c surface slots query
+    go ex@(ExEvalState (EvalState entity sta str su c)) = Transformer $ \qx -> 
+      case entity  of
+        MkSpec  iState hQuery rendr proxy -> 
+          case apNTWithContext c hQuery (Q . liftCoyoneda $ qx)  of 
+            EntityM m -> do  
+              let st = foldF (evalF (EvalState entity sta str su c)) m
+              ST.runStateT st ex
 
 -- don't export this
 -- | Runs an entity. For internal use only; you should use `tell` and `request` instead of this. 
@@ -126,8 +149,6 @@ getSlot = EntityM . liftF $ Child (SlotKey :: SlotKey label slots slot) id
 getSlot' ::  SlotKey label slots slot
          -> EntityM context slots state query IO (StorageBox slot)
 getSlot' slot = EntityM . liftF $ Child slot id
-
-
 
 -- | Construct a `Tell` query from a data constructor of a query algebra
 mkTell :: Tell q -> q ()
@@ -217,11 +238,23 @@ requestAll q = do
 mkRequest :: Request q x -> q x
 mkRequest q = q id
 
+apNTWithContext :: forall query surface slots state c x 
+               . DC.Forall c 
+              => TBoxedContext c 
+              -> QHandler query c slots state  
+              -> AlgebraQ query x 
+              -> EntityM c slots state query IO x 
+apNTWithContext box handler qx = unboxContext box $ go
+  where 
+    go :: forall (cxt :: SlotData). Dict (c cxt) -> TVar (RenderLeaf cxt) -> EntityM c slots state query IO x
+    go d@Dict tv = case instHandler @cxt handler of 
+      nt -> apNT nt qx 
+
 evalF :: forall slots' r' st' q' a' cxt'
     .  EvalState cxt' slots' r' st' q'
     -> EntityF cxt' slots' st' q' IO a'
     -> ST.StateT (ExEvalState cxt' r' slots' q') IO a'
-evalF EvalState{..} = \case
+evalF eState@EvalState{..} = \case
 
   State f -> case f _state of
     (a,newState) -> do
@@ -231,18 +264,22 @@ evalF EvalState{..} = \case
 
   Lift ma -> lift ma
 
-  Context g -> do 
-    cxt <- liftIO $ readTVarIO _context 
-    pure $ g cxt
+  Context g -> 
+    unboxContext' _context $ \d tv -> do 
+      leaf <- liftIO (readTVarIO tv)
+      pure $ withDict d (leaf ^. g)
 
-  Query q -> case apNT (handleQuery _entity) (Q q ) of
-    EntityM ef -> foldF (evalF (EvalState {..})) ef
+  Query q -> case _entity of 
+    MkSpec iState hQuery renderR proxy -> 
+      case apNTWithContext _context hQuery (Q q) of
+        EntityM ef -> foldF (evalF (EvalState {..})) ef
 
   Child slot f ->  pure . f $ lookupStorage slot _storage
 
   -- GHC doesn't get as mad if we do line-by-line "imperative style" vs trying to compose everything together
   Create slot i e' a -> case slot of
     SlotKey -> do
+      tcontext <- liftIO . atomically $ unTContext _context 
       e <- liftIO $ new_ _context e'
       lift (atomically $ observeE e) >>= \x@(MkRenderLeaf su cs) -> do
           ST.modify' $ \_ -> withDict (deriveStoreHas slot)
@@ -276,10 +313,17 @@ delete i = EntityM . liftF $ Delete (SlotKey :: SlotKey label slots '(i,su,Rende
 -- | Creates a child component at the designaed label and index from the Prototype argument.
 -- 
 --   Requires a type application for the label.
-create :: forall label slots i su cs q state query cxt c
-      . (ChildC label slots '(i,su,RenderTree cs,q), c cxt)
+create :: forall label slots i su cs q state query c
+      . (ChildC label slots '(i,su,RenderTree cs,q), DC.Forall c)
      => i
      -> Model su cs q c
-     -> EntityM cxt slots state query IO ()
-create i p = EntityM . liftF $ Create (SlotKey :: SlotKey label slots '(i,su,RenderTree cs,q))  i p ()
+     -> EntityM c slots state query IO ()
+create i p = EntityM . liftF $ Create (SlotKey :: SlotKey label slots '(i,su,RenderTree cs,q)) i p ()
+
+
+open' :: forall label slots i su cs q state query c r 
+      . (ChildC label slots '(i,su,RenderTree cs,q),DC.Forall c)
+     => (forall i su cs q . c '(i,su,cs,q) => Getter (RenderLeaf '(i,su,cs,q)) r) 
+     -> EntityM c slots state query IO r
+open' f = EntityM . liftF $ Context f 
 

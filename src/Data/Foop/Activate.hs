@@ -10,14 +10,16 @@ import Data.Foop.Eval
 import Control.Comonad.Store
 import Data.Foop.Slot
 import Data.Proxy
+import qualified Data.Constraint.Forall as DC
+import Data.Constraint
 
 -- | Takes a prototype and constructs a root entity, which can be queries 
 --   directly from the rest of the program.
 activate :: forall surface children query c
-          . (SlotOrdC (Slot () surface children query), c (Slot () surface children query))
+          . (SlotOrdC (Slot () surface children query), c (Slot () surface children query), DC.Forall c)
          => Model surface children query c
          -> IO (Object (Slot () surface children query))
-activate (Model p) = case p @(Slot () surface children query) of 
+activate (Model p) = case p Dict of 
   espec@MkSpec{..} -> do 
       let storage = mkStorage (Proxy @children)
       (renderTree :: RenderTree children) <- atomically $ MkRenderTree <$> toSurface (Proxy @children) storage

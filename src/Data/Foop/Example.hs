@@ -1,3 +1,4 @@
+{-# LANGUAGE ConstraintKinds #-}
 module Data.Foop.Example where
 
 import Data.Foop
@@ -11,7 +12,11 @@ import Data.Proxy (Proxy (Proxy))
 import Control.Concurrent.STM () 
 import Data.Row.Internal
 import Data.Default
-
+import qualified Data.Constraint.Forall as DC  
+import Control.Monad.Identity
+import Data.Constraint
+import Data.Foop.Slot
+import Control.Lens (view, (^?))
 
 
 -- Example #1: A Simple Counter 
@@ -46,25 +51,51 @@ returning x m = m >> pure x
 
 type Model' a b c = Model a b c Top 
 
-counter :: Model' String Empty CounterLogic
-counter =  Model $ MkSpec {
+
+type TOP :: forall k. k -> Constraint 
+class TOP c 
+instance TOP c 
+
+defaultSpec :: Spec Empty () () Identity TOP
+defaultSpec = MkSpec () (queryHandler $ \(Identity x) -> pure x) (mkSimpleRender (const ())) emptySlots
+
+mkSpec :: forall q c s cs st.  Spec cs s st q c -> Spec cs s st q c  
+mkSpec = id 
+
+
+mkModel:: Dict (DC.Forall c) -> Spec cs s st q c -> Spec cs s st q c 
+mkModel Dict spec = spec 
+
+
+
+counter =  mkModel Dict $ mkSpec @CounterLogic  $ defaultSpec {
     initialState = 0 :: Int
-  , handleQuery  = queryHandler runCounterLogic 
+  , handleQuery  = MkQHandler $ explicitly runCounterLogic 
   , renderer     = mkSimpleRender show  -- this is a function from the component's state to its surface
   , slots        = emptySlots 
   }
  where 
 -- runCounterLogic :: CounterLogic ~> EntityM Empty Int CounterLogic IO
-   runCounterLogic = \case 
-      GetCount f -> f <$> get 
 
-      Tick x -> returning x $ modify' (+1)   
 
-      Reset x -> returning x $ modify' (const 0) 
 
-      PrintCount x -> returning x $ do 
-        s <- get 
-        liftIO (print s)
+
+
+runCounterLogic =  \case 
+  GetCount f -> f <$> get 
+
+  Tick x -> returning x $ modify' (+1)   
+
+  Reset x -> do 
+   -- BoxedContext t <- lewk 
+   -- let hm = t ^? deep
+   -- _ <- open' (deep) >> pure () 
+    pure x 
+
+  PrintCount x -> returning x $ do 
+    s <- get 
+    liftIO (print s)
+
 
 
 -- If we wanted to use our counter Entity as a Root Entity, 

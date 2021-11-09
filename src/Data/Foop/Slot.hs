@@ -1,5 +1,6 @@
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE QuantifiedConstraints #-}
 
 module Data.Foop.Slot where
 
@@ -18,7 +19,9 @@ import Data.Constraint
 import Data.Foop.Dictionary
 import Control.Comonad.Store
 import Data.Coerce
-
+import Data.Row.Internal
+import GHC.TypeLits (Symbol)
+import GHC.Base (Any)
 
 -- | Given an Entity, renders its surface. Doesn't run the IO action.
 observeE :: forall slot
@@ -39,45 +42,11 @@ lookupStorage :: forall label slots slot
               -> StorageBox slot
 lookupStorage key@SlotKey storage = withDict (deriveStoreHas key) $ storage .! (Label @label)
 
-
-{--
-lookupNode :: forall label slots slot
-               . SlotKey label slots slot
-              -> RenderTree slots
-              -> RenderBranch slot
-lookupNode key@SlotKey (MkRenderTree renderTree)
-  = withDict (deriveSurfaceHas key)
-  $ renderTree .! (Label @label)
-
-modifyNode :: forall label slots slot
-               . SlotKey label slots slot
-              -> (RenderBranch slot -> RenderBranch slot)
-              -> RenderTree slots
-              -> RenderTree slots
-modifyNode key@SlotKey f tree@(MkRenderTree  renderTree)
-  =  withDict (deriveSurfaceHas key)
-  $ case lookupNode key tree of
-      oldNode -> let newNode = f oldNode
-                     newTree = R.update (Label @label) newNode renderTree
-                 in MkRenderTree  newTree
-
-insertSurface :: forall i su cs q
-               . Ord i
-              => i
-              -> RenderLeaf '(i,su,RenderTree cs,q)
-              -> RenderBranch '(i,su,RenderTree cs,q)
-              -> RenderBranch '(i,su,RenderTree cs,q)
-insertSurface i leaf@(MkRenderLeaf s r) (MkRenderBranch  m)
-  = MkRenderBranch $ M.insert (Indexed Index i) leaf m
-
-deleteSurface :: forall i su cs q
-               . Ord i
-              => i
-              -> RenderBranch '(i,su,RenderTree cs,q)
-              -> RenderBranch '(i,su,RenderTree cs,q)
-deleteSurface i (MkRenderBranch  m)
-  = MkRenderBranch $ M.delete (Indexed Index i) m
---}
+lookupSurface :: forall label slots slot 
+              . SlotKey label slots slot 
+             -> RenderTree slots 
+             -> RenderBranch slot 
+lookupSurface key@SlotKey (MkRenderTree cs) = withDict (deriveSurfaceHas key) $ cs .! (Label @label) 
 
 modifyStorage :: forall label slots slot
                . SlotKey label slots slot
@@ -154,15 +123,18 @@ mkStorage proxy = toStorage proxy $ mkProxy  proxy
 nodes :: forall slots. RenderTree slots -> Rec (R.Map RenderBranch slots)
 nodes = coerce
 
-type NodeC label slots slot = (HasType label slot slots, SlotOrdC slot, ChildC label slots slot, SlotConstraint slots)
+type NodeC label slot slots = (HasType label slot slots, SlotOrdC slot, ChildC label slots slot, SlotConstraint slots)
 
-branch :: forall label slots slot
-      . NodeC label slots slot 
+open :: forall c r. BoxedContext c -> (forall context. c context => RenderLeaf context -> r) -> r 
+open (BoxedContext cxt) f = f cxt 
+
+branch :: forall label slot slots 
+      . NodeC label slot slots 
      => Getter (RenderTree slots) (RenderBranch slot)
 branch = to (branch_ @label @slots @slot)
 
 branch_ :: forall label slots slot
-      . NodeC label slots slot 
+      . NodeC label slot slots  
       => RenderTree slots
       -> RenderBranch slot
 branch_ (MkRenderTree t) = withDict (deriveSurfaceHas (SlotKey @label @slots @slot)) $ t .! (Label @label)
@@ -207,4 +179,178 @@ deep_ (MkRenderLeaf s t) = t
 
 test = nodes bebop 
 
-test1 = bebop ^? (branch @"slot1" . leaf 2 . surface)
+
+test1 x = x ^? (branch @"slot1" . leaf 2 . surface)
+
+-- we only really care about: Top (Open, the root leaf), Down, Up, Branch'
+
+-- Deep :: Leaf slot -> Tree slots  
+-- Branch :: Tree slots -> Branch slot (branch == map index leaf)
+-- Surface :: Leaf slot -> surface 
+
+
+
+-- type family LastCrumb (crumbs :: Crumbs ) :: Path where 
+--  LastCrumb (a :> (b :> c)) = LastCrumb (b :> c)
+--  LastCrumb (a :> b) = b
+  
+data (:=) a b = a := b deriving (Show, Eq)
+-- blorp = Proxy @(LastCrumb (Begin  :> 'Deep))
+
+data Crumbs a = Begin | Crumbs a :> a
+
+deriving instance Show a => Show (Crumbs a) 
+
+
+data T a b c  
+  = Branch_ (b := c)
+  | Down_ a 
+  | Leaf_ c 
+
+type PathDir = Crumbs (T (Row SlotData) Symbol SlotData)
+
+
+
+
+data Path :: SlotData -> PathDir -> Type where 
+  Open :: forall slot. Path slot ('Begin :> 'Leaf_ slot)
+
+  Branch :: forall l t slots old root 
+         . (KnownSymbol l, HasType l t slots, SlotOrdC t) 
+        => SlotKey l slots t 
+        -> Path root (old :> 'Down_ slots) 
+        -> Path root ((old :> 'Down_ slots) :> 'Branch_ (l ':= t))
+
+  Leaf :: forall q i su cs l slots old root 
+        . Ord i 
+       => i
+       -> Path root (old :> 'Branch_ (l ':= Slot i su cs q))
+       -> Path root ((old :> 'Branch_ (l ':= Slot i su cs q)) :> 'Leaf_ (Slot i su cs q))
+
+  Down :: forall l i su cs q old root 
+        . Path root (old :> 'Leaf_ (Slot i su cs q))
+       -> Path root (old :> 'Leaf_ (Slot i su cs q) :> 'Down_ cs)
+
+(||>) :: Path root old -> (Path root old -> Path root new) -> Path root new 
+a ||> f = f a 
+infixl 1 ||>
+
+
+
+rbranch :: forall i su cs q a l b . Path (Slot i su cs q) (a :> 'Branch_ (l ':= b)) -> RenderLeaf (Slot i su cs q) -> Maybe (RenderBranch b)
+rbranch path leaf@(MkRenderLeaf su cs) = case path of 
+  Branch l@SlotKey old ->  case rdown old leaf of
+    Nothing -> Nothing  
+    Just t@(MkRenderTree cs) -> case lookupSurface l t of 
+      b@(MkRenderBranch m) -> Just b 
+
+
+rdown :: forall i su cs q a l b. Path (Slot i su cs q) (a :> 'Down_ b) -> RenderLeaf (Slot i su cs q) -> Maybe (RenderTree b)
+rdown path leaf@(MkRenderLeaf su cs) = case path of 
+  Down old -> case rleaf old leaf of 
+    Just (MkRenderLeaf su' cs') -> Just cs'  
+    Nothing -> Nothing 
+
+rleaf :: forall i su cs q a l b. Path (Slot i su cs q) (a :> 'Leaf_ b) -> RenderLeaf (Slot i su cs q) -> Maybe (RenderLeaf b) 
+rleaf path leaf@(MkRenderLeaf su cs) = case path of 
+  Open -> Just leaf 
+
+  Leaf i old -> case rbranch old leaf of 
+    Just (MkRenderBranch b) -> M.lookup (Indexed Index i) b 
+    Nothing -> Nothing 
+    
+
+doop2 =   Open 
+      ||> Down 
+      ||> Branch @"rootSlotA" SlotKey
+      ||> Leaf True 
+
+
+
+
+infixl 1 :>
+
+
+infixr 8 := 
+
+{-- 
+maybe scrap the zipper for now and implement a separate parent constraint for parent components and maybe a peer constraint? 
+that would allow messaging up and sideways, which isn't perfect, but it might be easier to combine those in some way vs this, which is
+probably better but somewhat difficult to implement s
+--}
+
+testRLeaf :: RenderLeaf MySlot 
+testRLeaf = undefined 
+
+hm = rleaf doop2 testRLeaf 
+
+type MySlot = Slot Bool Bool Row1 Maybe 
+
+type Row1 :: Row SlotData 
+type Row1 = "rootSlotA" .== Slot Bool Int Empty (Either String)
+         .+ "rootSlotB" .== Slot Char Int Row2 Maybe 
+
+type Row2 :: Row SlotData 
+type Row2 = "depth1SlotA" .== Slot Rational Double Empty Maybe 
+         .+ "depth1SlotB" .== Slot Int String Row3 (Either Bool)
+
+type Row3 :: Row SlotData 
+type Row3 = "depth2SlotA" .== Slot String () Empty []
+
+-- suppose we're writing row3 and we want to express the constraint that the root object 
+-- has a slot at label "depth1SlotB" of type (Slot Int String Row3 (Either Bool)) 
+-- inside
+
+-- (HasType "rootSlotB" (Slot Int su cs Maybe), HasType "depth1SlotB" (Slot Int su' Row3 (Either Bool)))
+
+type HasSurfaceF :: Type -> SlotData -> Constraint 
+type family HasSurfaceF su slot where 
+  HasSurfaceF su (Slot i su cs q) = () 
+
+type HasChildF :: Symbol -> SlotData -> SlotData -> Constraint 
+type family HasChildF l slot parent where 
+  HasChildF l (Slot i su cs r) (Slot pi psu pcs pr) = HasType l (Slot i su cs r) pcs
+
+type DeepCF :: (Row SlotData -> Constraint) -> SlotData -> Constraint 
+type family DeepCF c slot where 
+  DeepCF c (Slot i su cs r) = c cs 
+
+class HasSurfaceF su slot => HasSurface su slot where 
+  hasSurface :: Dict (HasSurfaceF su slot) 
+  hasSurface = Dict 
+
+instance HasSurfaceF su slot => HasSurface su slot
+
+class HasChildF l childSlot parentSlot => HasChild l childSlot parentSlot where 
+  hasChild :: Dict (HasChildF l childSlot parentSlot)
+  hasChild = Dict 
+
+instance HasChildF l childSlot parentSlot => HasChild l childSlot parentSlot 
+
+class DeepCF c slot => DeepC c slot where 
+  deepC :: Dict (DeepCF c slot)
+  deepC = Dict 
+
+instance DeepCF c slot => DeepC c slot 
+
+
+
+{--
+type AddressOf :: Type -> (Type -> Type) -> SlotData -> Constraint 
+type family AddressOf i q slot where 
+  AddressOf i q (Slot i su cs q) = ()
+
+class AddressOf i q slot => Addressed i q slot where 
+  sendTo :: forall l a pi psu pcs pq c st su cs 
+           . (slot ~ Slot i su cs q, HasType l slot pcs, KnownSymbol l, ChildC l pcs slot, SlotConstraint pcs, Ord i) 
+          => i 
+          -> q a 
+          -> EntityM c pcs st pq IO (Maybe a) 
+  sendTo i qa = do 
+    MkStorageBox cs <- getSlot @l @pcs @slot 
+    case M.lookup (Indexed Index i) cs of 
+      Nothing -> pure Nothing 
+      Just e  -> liftIO $ Just <$> run qa e 
+     
+instance AddressOf i q slot => Addressed i q slot
+--}
