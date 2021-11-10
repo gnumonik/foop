@@ -331,8 +331,12 @@ type SurfaceOf_ :: SlotData -> Type
 type family SurfaceOf_ slot where 
   SurfaceOf_ '(i,su,cs,q) = su 
 
-class SurfaceOf_ slot ~ su    => SurfaceOf slot su 
-instance SurfaceOf_ slot ~ su => SurfaceOf slot su 
+type OfSurface_ :: Type -> SlotData -> Constraint 
+type family OfSurface_ su slot  where 
+  OfSurface_ su (Slot i su cs q) = ()
+
+class (SurfaceOf_ slot ~ su, OfSurface_ su slot)    => SurfaceOf slot su 
+instance (SurfaceOf_ slot ~ su, OfSurface_ su slot) => SurfaceOf slot su 
 
 type ChildrenOf_ :: SlotData -> Type 
 type family ChildrenOf_ slot where 
