@@ -22,7 +22,7 @@ import Data.Coerce
 import Data.Row.Internal
 import GHC.TypeLits (Symbol, TypeError)
 import GHC.Base (Any)
-import Control.Lens (Optic', Profunctor)
+import Control.Lens (Optic', Profunctor, Lens')
 import Data.Singletons.Prelude.Eq
 import Data.Singletons (KindOf)
 
@@ -136,6 +136,7 @@ branch :: forall label slot slots
      => Getter (RenderTree slots) (RenderBranch slot)
 branch = to (branch_ @label @slots @slot)
 
+
 branch_ :: forall label slots slot
       . NodeC label slot slots  
       => RenderTree slots
@@ -146,13 +147,13 @@ type MaybeLeaf :: SlotData -> Type
 newtype MaybeLeaf slot = MaybeLeaf {maybeLeaf :: Maybe (RenderLeaf slot)}
 
 leaf :: forall i su cs q 
-      . (SlotOrdC (Slot i su cs q))
+      . Ord i
      => i 
      -> Fold (RenderBranch (Slot i su cs q)) (RenderLeaf (Slot i su cs q))
 leaf i = folding $ leaf_ @i @su @cs @q i 
 
 leaf_ :: forall i su cs q 
-      . (SlotOrdC (Slot i su cs q))
+      .  Ord i 
      => i
      -> RenderBranch (Slot i su cs q)
      -> Maybe (RenderLeaf (Slot i su cs q))
@@ -170,33 +171,25 @@ surface_ :: forall i su cs q
 surface_ (MkRenderLeaf s t) = s 
 
 deep :: forall i su cs q
-      . SlotOrdC (Slot i su cs q)
-     => Getter (RenderLeaf (Slot i su cs q)) (RenderTree cs)
+      .  Getter (RenderLeaf (Slot i su cs q)) (RenderTree cs)
 deep = to deep_
 
 deep_ :: forall i su cs q 
-       . SlotOrdC (Slot i su cs q)
-      => RenderLeaf (Slot i su cs q)
+       . RenderLeaf (Slot i su cs q)
       -> RenderTree cs 
 deep_ (MkRenderLeaf s t) = t 
 
 test = nodes bebop 
 
-
 test1 x = x ^? (branch @"slot1" . leaf 2 . surface)
-
 
 deNormalize :: NormalizedPath root path -> Path root path 
 deNormalize = \case 
   Start' -> Start 
-  Branch' sk np -> Branch sk (deNormalize np) 
+  Branch' SlotKey np -> Branch  (deNormalize np) 
   Leaf' i np -> Leaf i (deNormalize np)
   Down1 np -> Down (deNormalize np)
   Down2 np -> Down (deNormalize np)
-
-
-
-
 
 (||>) :: Path root old -> (Path root old -> Path root new) -> Path root new 
 a ||> f = f a 
@@ -208,128 +201,79 @@ ebranch :: forall i su cs q a l b
         -> STM (Maybe (Rec (l .== StorageBox b)))
 ebranch = undefined 
 
-
-traceS :: forall i su cs q a l path
-        . NormalizedPath (Slot i su cs q) path 
-        -> RenderLeaf (Slot i su cs q) 
-        -> Maybe (TraceS path)
-traceS path root@(MkRenderLeaf su cs) = case path of 
-  b@(Branch' key old) -> rbranch b root
-
-  d@(Down1 old) -> rdown1 d root 
-
-  d@(Down2 old) -> rdown2 d root 
-
-  l@(Leaf' i old) -> rleaf l root 
-
-  Start' -> Just root 
-
 type PathErr root path = Path root path
-
-rbranch :: forall i su cs q a l b 
-         . NormalizedPath (Slot i su cs q) (a :> 'Branch_ (l ':= b)) 
-        -> RenderLeaf (Slot i su cs q) 
-        -> Maybe (RenderBranch b)
-rbranch path leaf@(MkRenderLeaf su cs) = case path of 
-  Branch' l old ->  case traceS old leaf of
-    Nothing -> Nothing  
-    Just t@(MkRenderTree cs) -> case lookupSurface l t of 
-      b@(MkRenderBranch m) -> Just b 
-
-rdown1 :: forall i su cs q a l
-        . NormalizedPath (Slot i su cs q) ('Begin ('Leaf_ (Slot i su cs q)) :> 'Down_ cs) 
-       -> RenderLeaf (Slot i su cs q) 
-       -> Maybe (RenderTree cs)
-rdown1 (Down1 Start') leaf@(MkRenderLeaf su cs) = Just cs 
-
-rdown2 :: forall i su cs q a l old1 i' su' cs' q'
-        . NormalizedPath (Slot i su cs q) (old1 :> 'Leaf_ (Slot i' su' cs' q') :> 'Down_ cs')
-       -> RenderLeaf (Slot i su cs q)
-       -> Maybe (RenderTree cs')
-rdown2 (Down2 l) leaf@(MkRenderLeaf su cs) = case rleaf l leaf of 
-  Just (MkRenderLeaf su cs) -> Just cs 
-  Nothing -> Nothing  
-
-rleaf :: forall i su cs q a l old slot
-       . NormalizedPath (Slot i su cs q) (old :> 'Leaf_ slot)
-      -> RenderLeaf (Slot i su cs q) 
-      -> Maybe (RenderLeaf slot) 
-rleaf path leaf@(MkRenderLeaf su cs) = case path of 
-  Leaf' i old -> case rbranch old leaf of 
-    Just (MkRenderBranch b) -> M.lookup (Indexed Index i) b 
-    Nothing -> Nothing 
-
 
 doop2 =   Start 
       ||> Down 
-      ||> Branch @"rootSlotA" SlotKey 
+      ||> Branch @"rootSlotA" 
 
-    
-      
+type family Target (p :: PathDir) :: T (Row SlotData) Symbol SlotData where 
+  Target ('Begin l) = l 
+  Target (a :> b)   = b 
+
+class Certainly (slot :: SlotData) (p :: PathDir) where 
+  mkGetter :: NormalizedPath slot p -> Getter (RenderLeaf slot) (TraceS p)
+
+instance Certainly (Slot i su cs q) ('Begin ('Leaf_ (Slot i su cs q))) where 
+  mkGetter Start' = to id
+
+instance Certainly root (old :> 'Down_ slots) => Certainly root ((old :> 'Down_ slots) :> 'Branch_ (l ':= Slot i su cs q)) where 
+  mkGetter (Branch' key old) = mkGetter old . to (lookupSurface key)
+
+instance  Certainly (Slot i su cs q) ('Begin ('Leaf_ (Slot i su cs q)) :> 'Down_ cs) where 
+  mkGetter (Down1 Start') = to $ \(MkRenderLeaf su cs) -> cs
+
+class Possibly (slot :: SlotData) (p :: PathDir) where 
+  mkFold :: NormalizedPath slot p -> Fold (RenderLeaf slot) (TraceS p)
+
+instance Possibly (Slot i su cs q) ('Begin ('Leaf_ (Slot i su cs q))) where 
+  mkFold Start' = to id
+
+instance Possibly root (old :> 'Down_ slots) => Possibly root ((old :> 'Down_ slots) :> 'Branch_ (l ':= Slot i su cs q)) where 
+  mkFold (Branch' key old) = mkFold old . to (lookupSurface key)
+
+instance  Possibly (Slot i su cs q) ('Begin ('Leaf_ (Slot i su cs q)) :> 'Down_ cs) where 
+  mkFold (Down1 Start') = to $ \(MkRenderLeaf su cs) -> cs
+
+instance Possibly root (old :> 'Branch_ (l ':= Slot i su cs q)) => Possibly root (old :> 'Branch_ (l ':= Slot i su cs q) :> 'Leaf_ (Slot i su cs q)) where 
+  mkFold (Leaf' i old) = mkFold old . leaf i
+
+instance Possibly root (old1 :> 'Leaf_ (Slot i su cs q)) => Possibly root (old1 :> 'Leaf_ (Slot i su cs q) :> 'Down_ cs) where 
+  mkFold (Down2 old) = mkFold old . to (\(MkRenderLeaf su cs) -> cs)
+
+fetch :: Certainly root path => NormalizedPath root path -> RenderLeaf root -> TraceS path 
+fetch npath leaf = leaf ^. mkGetter npath 
+
+search :: Possibly root path => NormalizedPath root path -> RenderLeaf root -> Maybe (TraceS path)
+search npath leaf = leaf ^? mkFold npath 
+
 applyPath :: forall slot t t'. t ~ t' => Path slot t' -> Path slot t 
 applyPath path = path 
-
 
 applyPathN :: forall slot t. NormalizedPath slot t -> NormalizedPath slot t 
 applyPathN path = path 
 
 
-
-
-
-
-
-doop3 = Start ||> Down ||> Branch @"rootSlotA" SlotKey ||> Leaf True ||> Up
-
+doop3 = Start ||> Down ||> Branch @"rootSlotA" ||> Leaf True ||> Up
 
 doop4 = Start ||> Up
-
-
-
-{-- 
-maybe scrap the zipper for now and implement a separate parent constraint for parent components and maybe a peer constraint? 
-that would allow messaging up and sideways, which isn't perfect, but it might be easier to combine those in some way vs this, which is
-probably better but somewhat difficult to implement s
---}
 
 testRLeaf :: RenderLeaf MySlot 
 testRLeaf = undefined 
 
 
-
-
-
-  
 bebop3 =  normalize (applyPath @MySlot doop3)
 
-
-
-
-
-
-pth = traceS bebop3 testRLeaf 
+pth = search yoyo testRLeaf 
 
 bodoop :: forall t slot. t ~ Maybe (RenderLeaf slot) => Maybe (RenderLeaf slot) -> Proxy (Maybe (RenderLeaf slot))
 bodoop _ = Proxy 
 
 
-
-
-
-
-
-
-
-
-yoyo  = let !x = mergePaths   (applyPath @MySlot (  Start 
+yoyo  = mergePaths   (applyPath @MySlot (  Start 
                                          ||> Down 
-                                         ||> Branch @"rootSlotB" SlotKey 
+                                         ||> Branch @"rootSlotB" 
                                          ||> Leaf 'a' ))  (Start ||> Down)
-        in case x of 
-              z -> z 
-
-
-
 
 
 type MySlot = Slot Bool Bool Row1 Maybe 
@@ -344,12 +288,6 @@ type Row2 = "depth1SlotA" .== Slot Rational Double Empty Maybe
 
 type Row3 :: Row SlotData 
 type Row3 = "depth2SlotA" .== Slot String () Empty []
-
--- suppose we're writing row3 and we want to express the constraint that the root object 
--- has a slot at label "depth1SlotB" of type (Slot Int String Row3 (Either Bool)) 
--- inside
-
--- (HasType "rootSlotB" (Slot Int su cs Maybe), HasType "depth1SlotB" (Slot Int su' Row3 (Either Bool)))
 
 type HasSurfaceF :: Type -> SlotData -> Constraint 
 type family HasSurfaceF su slot where 
@@ -381,22 +319,4 @@ class DeepCF c slot => DeepC c slot where
 
 instance DeepCF c slot => DeepC c slot 
 
-{--
-type AddressOf :: Type -> (Type -> Type) -> SlotData -> Constraint 
-type family AddressOf i q slot where 
-  AddressOf i q (Slot i su cs q) = ()
 
-class AddressOf i q slot => Addressed i q slot where 
-  sendTo :: forall l a pi psu pcs pq c st su cs 
-           . (slot ~ Slot i su cs q, HasType l slot pcs, KnownSymbol l, ChildC l pcs slot, SlotConstraint pcs, Ord i) 
-          => i 
-          -> q a 
-          -> EntityM c pcs st pq IO (Maybe a) 
-  sendTo i qa = do 
-    MkStorageBox cs <- getSlot @l @pcs @slot 
-    case M.lookup (Indexed Index i) cs of 
-      Nothing -> pure Nothing 
-      Just e  -> liftIO $ Just <$> run qa e 
-     
-instance AddressOf i q slot => Addressed i q slot
---}

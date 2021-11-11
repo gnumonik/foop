@@ -416,15 +416,12 @@ testEntailment = mapDict (derive @c1 @c2 @a) Dict
 
 
 data (:=) a b = a := b deriving (Show, Eq)
--- blorp = Proxy @(LastCrumb (Begin  :> 'Deep))
+
 infixr 8 := 
 
 
 data Crumbs a = Begin a | Crumbs a :> a
 infixl 1 :>
-
-
-
 deriving instance Show a => Show (Crumbs a) 
 
 data T a b c  
@@ -435,23 +432,25 @@ data T a b c
 
 type PathDir = Crumbs (T (Row SlotData) Symbol SlotData)
 
+type Trail = (T (Row SlotData) Symbol SlotData)
+
 type StorageTree :: Row SlotData -> Type 
 data StorageTree slots where 
   MkStorageTree :: Rec (R.Map StorageBox slots) -> StorageTree slots 
 
 type TraceS :: PathDir -> Type 
 type family TraceS crumbs where 
-  TraceS ('Begin ('Leaf_ t)) = RenderLeaf t 
-  TraceS (old :> 'Leaf_ t) = RenderLeaf t 
+  TraceS ('Begin ('Leaf_ t))         = RenderLeaf t 
+  TraceS (old :> 'Leaf_ t)           = RenderLeaf t 
   TraceS (old :> 'Branch_ (l ':= t)) = RenderBranch t 
-  TraceS (old :> 'Down_ t) = RenderTree t 
+  TraceS (old :> 'Down_ t)           = RenderTree t 
 
 type TraceE :: PathDir -> Type 
 type family TraceE crumbs where 
-  TraceE ('Begin ('Leaf_ t)) = Entity t 
-  TraceE (old :> 'Leaf_ t)   = Entity t 
-  TraceE (old :> 'Branch_ (l ':= t)) = Rec (l .== StorageBox t)
-  TraceE (old :> 'Down_ t) = StorageTree t  
+  TraceE ('Begin ('Leaf_ t))         = Entity t 
+  TraceE (old :> 'Leaf_ t)           = Entity t 
+  TraceE (old :> 'Branch_ (l ':= t)) = StorageBox t
+  TraceE (old :> 'Down_ t)           = StorageTree t  
 
 type Connect :: PathDir -> Symbol ->  PathDir -> PathDir 
 type family Connect crumbs1 l crumbs2 where 
@@ -476,9 +475,6 @@ type family NormalizeF path where
   NormalizeF (old :> 'Branch_ b) 
     = NormalizeF old :> 'Branch_ b 
 
-  
-
-
 class -- Normalized (NormalizeF p) => 
   Normalize (p :: PathDir)  where 
   normalize :: forall root. Path root p -> NormalizedPath root (NormalizeF p)
@@ -489,16 +485,14 @@ instance Normalize ('Begin ('Leaf_ slot)) where
 instance Normalize ('Begin ('Leaf_ (Slot i su cs q)) :> 'Down_ cs ) where 
   normalize (Down Start) = Down1 Start' 
 
-instance ( -- Normalized (NormalizeF (old :> 'Leaf_ (Slot i su cs q) :> 'Down_ cs))
-         -- , 
-         Normalize old) 
+instance Normalize old
         => Normalize (old :> 'Leaf_ (Slot i su cs q) :> 'Down_ cs) where 
   normalize (Down (Leaf i p)) = Down2 (Leaf' i $ normalize p) 
 
 instance Normalize (old :> 'Down_ cs ) 
       => Normalize (old :> 'Down_ cs :> 'Branch_ (l ':= slot) :> 'Leaf_ slot :> 'Up_ slot ) 
   where 
-    normalize (Up (Leaf i (Branch k d@(Down d')))) = normalize d 
+    normalize (Up (Leaf i (Branch  d@(Down d')))) = normalize d 
 
 instance ( Normalized (NormalizeF (old1 :> old2 :> 'Leaf_ l))
          , Normalize (old1 :> old2)) 
@@ -507,7 +501,7 @@ instance ( Normalized (NormalizeF (old1 :> old2 :> 'Leaf_ l))
     Leaf i p -> Leaf' i (normalize p)
 
 instance Normalize old => Normalize (old :> 'Branch_ b) where 
-  normalize (Branch key p) = Branch' key (normalize p)
+  normalize (Branch  p) = Branch' SlotKey (normalize p)
 
 class Normalized (p :: PathDir)
 -- instance Normalized 'Begin 
@@ -515,6 +509,10 @@ instance Normalized ('Begin ('Leaf_ l))
 instance Normalized (old1 :> old2 ) => Normalized (old1 :> old2 :> 'Leaf_ l)
 instance Normalized old => Normalized (old :> 'Branch_ b)
 instance Normalized old => Normalized (old :> 'Down_ b)
+
+type family Last (p :: PathDir) :: (T (Row SlotData) Symbol SlotData) where 
+  Last ('Begin t) = t 
+  Last (a :> b)   = b  
 
 type ConnectableF :: PathDir -> Symbol -> PathDir -> Constraint 
 class ConnectableF p1 l  p2
@@ -524,50 +522,54 @@ instance ( KnownSymbol l
 
 instance ConnectableF (old :> 'Leaf_ slot) l  a => ConnectableF (old :> 'Leaf_ slot) l  a 
 
-connect :: forall l slot cs root old new 
-         . (ConnectableF (old :> 'Leaf_ slot) l new)
-        => Path root (old :> 'Leaf_ slot)
-        -> Path slot new
-        -> Path root (Connect (old :> 'Leaf_ slot) l  new )
-connect root p = case root of 
+type Connected :: PathDir -> PathDir -> PathDir 
+type family Connected p1 p2 where 
+  Connected (old :> 'Leaf_ slot) ('Begin ('Leaf_ slot))         =  (old :> 'Leaf_ slot)
+  Connected old (new1 :> new2) = Connected old new1 :> new2 
 
-  Leaf i path -> case p of  
-      Start -> root 
+type Connectable :: PathDir -> Trail -> Symbol -> PathDir -> Constraint 
+class Last p2 ~ Last (Connected (old :> p1) p2) => Connectable old p1 l p2 where 
+  connect' :: Path root (old :> p1) -> Path slot p2 -> Path root (Connected (old :> p1) p2)
 
-      Leaf i path -> Leaf i $  connect @l  root path 
+instance Connectable old ('Leaf_ slot) l ('Begin ('Leaf_ slot)) where 
+           connect' (Leaf i rest) Start = Leaf i rest 
 
-      Branch key path -> Branch key (connect @l root path)
+instance Connectable old p1 l p2  => Connectable old p1 l (p2 :> 'Leaf_ slot) where 
+  connect' old = \case 
+    Leaf i path -> Leaf i (connect' @old @p1 @l @p2 old path) 
 
-      Up path   -> case path of 
-        Branch _ _ -> undefined 
-        doop -> undefined -- Up (connect @l root path) 
+instance (Connectable old p1 l p2, Downable (Connected (old :> p1) p2) slots)  
+      => Connectable old p1 l (p2 :> 'Down_ slots) where 
+  connect' old = \case 
+    Down path -> Down (connect' @old @p1 @l @p2 old path)
 
-      Down path -> case path of 
-        Start -> undefined 
-        Branch sk pa -> undefined 
-        Leaf i' pa -> undefined 
-        Down pa -> undefined 
-        Up pa -> undefined 
-        -- Start Down $ connect @l root path 
+instance (Connectable old p1 l p2, Uppable (Connected (old :> p1) p2) slot) 
+      => Connectable old p1 l (p2 :> 'Up_ slot) where 
+        connect' old = \case 
+          Up path -> Up (connect' @old @p1 @l @p2 old path)
 
-class ( ConnectableF (old :> 'Leaf_ slot) l new
-      , Normalize (Connect (old :> 'Leaf_ slot) l new)
-     -- , Normalized (NormalizeF (Connect (old :> 'Leaf_ slot )l new))
-      )
-      => CompatibleC slot new old l  where 
+instance Connectable old p1 l p2 => Connectable old p1 l (p2 :> 'Branch_ (l ':= Slot i su cs q)) where 
+  connect' old = \case 
+    Branch path -> Branch $ connect' @old @p1 @l @p2 old path 
+
+class (  Normalize (Connected (old :> 'Leaf_ slot) new)
+       , Connectable old ('Leaf_ slot) l new 
+       , Normalized (NormalizeF (Connected (old :> 'Leaf_ slot ) new))
+      ) => CompatibleC slot new old l  where 
             mergePaths :: forall root 
                         . Path root (old :> 'Leaf_ slot)
                        -> Path slot new 
-                       -> NormalizedPath root (NormalizeF (Connect (old :> 'Leaf_ slot) l new))
-            mergePaths p1 p2 = normalize $ connect @l p1 p2 
+                       -> NormalizedPath root (NormalizeF (Connected (old :> 'Leaf_ slot)  new))
+            mergePaths p1 p2 = normalize $ connect' @old @('Leaf_ slot) @l @new p1 p2 
 
-instance ( ConnectableF (old :> 'Leaf_ slot) l new
-      , Normalize (Connect (old :> 'Leaf_ slot) l new)
-      , Normalized (NormalizeF (Connect (old :> 'Leaf_ slot )l new)))
-      => CompatibleC slot new old l 
+instance ( Normalize (Connected (old :> 'Leaf_ slot) new)
+         , Connectable old ('Leaf_ slot) l new 
+         , Normalized (NormalizeF (Connected (old :> 'Leaf_ slot ) new))
+         ) => CompatibleC slot new old l 
 
-type CompatibleQ slot new = DC.ForallV (CompatibleC slot new) 
 
+
+ 
 type family HasLeaf (p :: PathDir) (s :: SlotData) :: Constraint where 
   HasLeaf ('Begin ('Leaf_ slot)) slot = ()
   HasLeaf (old :> 'Leaf_ slot) slot   = ()
@@ -579,10 +581,9 @@ type family GetLeaf (p :: PathDir) :: SlotData where
 data Path :: SlotData -> PathDir -> Type where 
   Start :: forall l i q su cs. (Ord i) =>  Path (Slot i su cs q) ('Begin ('Leaf_ (Slot i su cs q)))
 
-  Branch :: forall l i q su cs slots old root 
-         . (KnownSymbol l, HasType l (Slot i su cs q) slots, Ord i) 
-        => SlotKey l slots (Slot i su cs q) 
-        -> Path root (old :> 'Down_ slots) 
+  Branch :: forall l i q su slots cs root old 
+          . (ChildC l slots (Slot i su cs q), Ord i, Forall slots SlotOrdC) 
+        => Path root (old :> 'Down_ slots) 
         -> Path root ((old :> 'Down_ slots) :> 'Branch_ (l ':= Slot i su cs q))
 
   Leaf :: forall l q i su cs  slots old root 
@@ -596,11 +597,10 @@ data Path :: SlotData -> PathDir -> Type where
        => Path root old 
        -> Path root (old :> 'Down_ cs)
 
-  Up :: forall  slot i su q root old1 slots 
-    .  Uppable old1 slot 
-    => Path root old1 
-    -> Path root (old1 :> Up_ slot)
-
+  Up  :: forall  slot i su q root old1 slots 
+      .  Uppable old1 slot 
+      => Path root old1 
+      -> Path root (old1 :> Up_ slot)
 
 type family DownF (p :: PathDir) :: Row SlotData where 
   DownF ('Begin ('Leaf_ (Slot i su cs q)))  = cs 
