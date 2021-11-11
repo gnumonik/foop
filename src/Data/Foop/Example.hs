@@ -49,33 +49,33 @@ returning x m = m >> pure x
 
 -- counter :: Prototype String CounterLogic 
 
-type Model' a b c = Model a b c Top 
+
 
 
 type TOP :: forall k. k -> Constraint 
 class TOP c 
 instance TOP c 
 
-defaultSpec :: Spec Empty () () Identity TOP
+
 defaultSpec = MkSpec () (queryHandler $ \(Identity x) -> pure x) (mkSimpleRender (const ())) emptySlots
 
-mkSpec :: forall q c s cs st.  Spec cs s st q c -> Spec cs s st q c  
-mkSpec = id 
-
-
-mkModel:: Dict (DC.Forall c) -> Spec cs s st q c -> Spec cs s st q c 
-mkModel Dict spec = spec 
 
 
 
-counter =  mkModel Dict $ mkSpec @CounterLogic  $ defaultSpec {
+
+
+
+
+counter =  Model $ MkSpec {
     initialState = 0 :: Int
-  , handleQuery  = MkQHandler $ explicitly runCounterLogic 
+  , handleQuery  = queryHandler runCounterLogic 
   , renderer     = mkSimpleRender show  -- this is a function from the component's state to its surface
   , slots        = emptySlots 
   }
- where 
+
 -- runCounterLogic :: CounterLogic ~> EntityM Empty Int CounterLogic IO
+
+
 
 
 
@@ -87,6 +87,7 @@ runCounterLogic =  \case
   Tick x -> returning x $ modify' (+1)   
 
   Reset x -> do 
+    -- badoop <- observe_ (Start ||> Up) (const ())
    -- BoxedContext t <- lewk 
    -- let hm = t ^? deep
    -- _ <- open' (deep) >> pure () 
@@ -196,7 +197,8 @@ type CountersSlots = "counterA" .== Slot String String Empty CounterLogic
 --mkCounters :: Prototype String CountersLogic
 
 
-counters :: Model String CountersSlots CountersLogic Top 
+
+
 counters = Model $  MkSpec {
     initialState = ()
   , handleQuery = queryHandler runCounters 

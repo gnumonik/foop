@@ -16,11 +16,10 @@ import Data.Constraint
 -- | Takes a prototype and constructs a root entity, which can be queries 
 --   directly from the rest of the program.
 activate :: forall surface children query c
-          . (SlotOrdC (Slot () surface children query), c (Slot () surface children query), DC.Forall c)
-         => Model surface children query c
+          . (SlotOrdC (Slot () surface children query))
+         => Model surface children query ('Begin ('Leaf_ (Slot () surface children query)))
          -> IO (Object (Slot () surface children query))
-activate (Model p) = case p Dict of 
-  espec@MkSpec{..} -> do 
+activate (Model espec@MkSpec{..}) =  do 
       let storage = mkStorage (Proxy @children)
       (renderTree :: RenderTree children) <- atomically $ MkRenderTree <$> toSurface (Proxy @children) storage
       let rendered = render renderer initialState

@@ -15,10 +15,7 @@ import Data.Constraint
 import Control.Concurrent.STM
 import qualified Data.Constraint.Forall as DC
 
-explicitly :: forall k (c :: k -> Constraint) (a :: k) r 
-            . (c a => r)
-           -> (Dict (c a) -> r)
-explicitly f = \d@Dict -> withDict d f 
+
 
 mapE :: forall k (c :: k -> Constraint) (a :: k) r r'  
             . (c a => r)
@@ -48,32 +45,28 @@ mkSimpleRender :: (state -> surface)
                -> Renderer state surface 
 mkSimpleRender f = MkRenderer f (const $ pure ()) 
 
-instHandler :: forall context c slots state query. 
-               (DC.Forall c, c context )
-            => QHandler query c slots state 
-            -> AlgebraQ query :~> EntityM c slots state query IO
-instHandler (MkQHandler  handler) = case handler Dict of 
-  handler' -> case DC.inst @c @context of 
-    d -> case mapDict d (Dict @(DC.Forall c))  of 
-      Dict ->  NT $ \(Q q) -> unCoyoneda (\g -> fmap g . handler Dict) q 
+instHandler :: forall loc slots state query. 
+               QHandler query loc slots state 
+            -> AlgebraQ query :~> EntityM loc slots state query IO
+instHandler (MkQHandler  handler) 
+  =  NT $ \(Q q) -> unCoyoneda (\g -> fmap g . handler) q 
+
+
 
 
 -- | `queryHandler` takes a function of type (forall x. query x -> EntityM slots state query m)
 --   and packages it into a boxed natural transformation. 
-queryHandler :: forall query c slots state   
-        . (DC.Forall c => query ~> EntityM c slots state query IO)
-       -> QHandler query c slots state  
-queryHandler eval = MkQHandler $ explicitly eval 
-  where 
-    eval' :: Dict (DC.Forall c) -> (forall x. query x -> EntityM c slots state query IO x)
-    eval' = explicitly eval 
+queryHandler :: forall query slots state loc 
+        . (query ~> EntityM loc slots state query IO)
+       -> AlgebraQ query :~> EntityM loc slots state query IO 
+queryHandler eval = NT $ \(Q q) -> unCoyoneda (\g -> fmap g . eval) q 
 
 
 
-
+{--
     go :: (forall x. query x -> EntityM c slots state query IO x) -> (AlgebraQ query :~> EntityM c slots state query IO)
     go  f = NT $ \(Q q) -> unCoyoneda (\g -> fmap  g . f ) q
-
+--}
 unCoyoneda :: forall (q :: Type -> Type) 
                       (a :: Type) 
                       (r :: Type)
@@ -94,10 +87,9 @@ unboxContext' :: forall (c :: SlotData -> Constraint) r. TBoxedContext c
              -> r 
 unboxContext' (TBoxedContext cxt) f = f Dict  cxt 
 
-
-withModel :: forall surface slots query c r 
-           . DC.Forall c 
-          => Model surface slots query c 
+{--
+withModel :: forall surface slots query loc r 
+           . Model surface slots query loc 
           -> TBoxedContext c 
           -> (forall state cxt
               . c cxt 
@@ -118,7 +110,7 @@ withModel m box f = unboxContext box $ \d t -> go  d m t   f
              -> r) 
        -> r
     go d@Dict (Model spec) tv g = g tv (spec Dict)
-
+--}
 
 {--
 -- | Constructs a Prototype provides the Row of Slotdata for the prototype satisfies SlotConstraint

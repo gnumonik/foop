@@ -25,6 +25,7 @@ import qualified Data.Constraint.Forall as DC
 import Control.Lens (Fold, to, Lens')
 import Control.Lens.Getter
 import Data.Type.Equality (type (:~:))
+import Control.Concurrent.STM (TMVar)
 
 ------------
 -- Types 
@@ -44,9 +45,6 @@ type SlotData = (Type,Type,Type, Type -> Type)
 --   to express that here. 
 type Slot :: Type -> Type -> Row SlotData -> (Type -> Type) ->  SlotData 
 type Slot index surface children query = '(index,surface,RenderTree children,query)
-
-
-
 
 -- | GADT which records the necessary Slot Data and functions as a kind of 
 --   key for operations over child entities. It shouldn't ever be necessary for 
@@ -69,54 +67,43 @@ data EntityF loc slots state query m a where
 
   Lift    :: m a -> EntityF c slots state query m a
 
-  Observe :: CompatibleC (Slot i su slots query) path loc 
+  Observe ::  CompatibleC (Slot i su slots query) loc path
           =>  Path (Slot i su slots query) path
           -> (TraceS path -> a)
           -> EntityF loc slots state query m a 
 
-  Interact :: CompatibleC (Slot i su slots query) path loc 
+  Interact :: CompatibleC (Slot i su slots query) loc path 
           =>  Path (Slot i su slots query) path
           -> (TraceE path -> a)
           -> EntityF loc slots state query m a 
 
   Query    :: Coyoneda query a -> EntityF deps slots state query m a
 
-  Child    :: SlotKey l slots slot 
+  GetSlot  :: SlotKey l slots slot 
            -> (StorageBox slot -> a) 
            -> EntityF c slots state query m a
 
-  Create   :: SlotKey l slots '(i,su,RenderTree cs,q)
+  Create   :: SlotKey l slots (Slot i su cs q)
            -> i
-           -> Model su cs q c
+           -- probably going to need some kind of normalize constraint 
+           -> Model su cs q new
            -> a 
-           -> EntityF deps slots state query m a
+           -> EntityF (loc :> 'Leaf_ (Slot i2 su2 slots query)) slots state query m a
 
   Delete   :: SlotKey l slots '(i,su,RenderTree cs,q)
            -> i
            -> a 
            -> EntityF c slots state query m a
 
-data TracedS :: PathDir -> Type -> Type where 
-  TracedS :: (TraceS path -> r) -> TracedS path r 
--- (a -> f b) -> f t -> 
-
-fmapTracedS :: (a -> b) -> TracedS path a -> TracedS path b 
-fmapTracedS f (TracedS g) = TracedS (fmap f g)
 instance Functor m => Functor (EntityF location slots state query m) where
-  fmap f' = goFMap f' 
-   where 
-     goFMap :: forall a b
-             . (a -> b) 
-            -> EntityF location slots state query m a 
-            -> EntityF location slots state query m b
-     goFMap f =   \case
+  fmap f =  \case
         State k          -> State (first f . k)
         Lift ma          -> Lift (f <$> ma)
-        o@(Observe path g)    -> Observe path (fmap f g)
-        Interact path g       -> Interact path (fmap f g) 
+        Observe path g   -> Observe path (fmap f g)
+        Interact path g  -> Interact path (fmap f g) 
         Query qb         -> Query $ fmap f qb
-        Child key g      -> Child key $ fmap f g -- (goChild f key g)
-        Create key i e a -> Create key i e (f a)
+        GetSlot key g    -> GetSlot key $ fmap f g -- (goChild f key g)
+        Create s@SlotKey i e a -> Create s i e (f a)
         Delete key i a   -> Delete key i (f a)
 
 -- | `EntityM` is the newtype wrapper over the (church-encoded) free monad
@@ -189,10 +176,10 @@ data Prototype :: Type -> Row SlotData -> (Type -> Type) -> SlotData -> Type whe
 --}
 
 data Model :: Type -> Row SlotData -> (Type -> Type) -> PathDir -> Type where 
-  Model :: forall surface slots query state deps  
+  Model :: forall surface slots query state loc 
          . (SlotConstraint slots)
-        =>  Spec slots surface state query deps 
-        -> Model surface slots query deps 
+        =>  Spec slots surface state query loc
+        -> Model surface slots query loc
 
 -- | `~>` is a type synonym for natural transformations (generally between functors
 --   but that constraint can't be expressed here).
@@ -216,16 +203,21 @@ data Renderer  state surface where
   , onRender  :: surface -> IO ()
   } -> Renderer state surface 
 
+newtype Handler query state slots loc 
+  = Handler {
+      runHandler 
+      :: forall r. ((forall x. query x -> EntityM loc slots state query IO x) -> r) -> r}
+
 -- | A `Spec` is the GADT from which an Entity is constructed. 
 type Spec :: Row SlotData -> Type -> Type -> (Type -> Type) -> PathDir -> Type
 data Spec slots surface state query c where
   MkSpec ::
-   ( WellBehaved slots ) => 
+   ( WellBehaved slots) => 
     { initialState   :: state 
-    , handleQuery    :: QHandler query deps slots state 
+    , handleQuery    :: AlgebraQ query :~> EntityM loc slots state query IO 
     , renderer       :: Renderer state surface 
     , slots          :: Proxy slots
-    } -> Spec slots surface state query deps
+    } -> Spec slots surface state query loc
 
 -- | `AlgebraQ query a` is a wrapper around a type which records a query algebra. 
 --   
@@ -245,25 +237,25 @@ data QHandler query loc slots state  where
 --   and a Context which can be read from inside the Prototype monad 
 type EvalState :: SlotData -> PathDir -> Row SlotData -> Type -> Type -> (Type -> Type) -> Type
 data EvalState root loc slots surface st q where 
-  EvalState ::  {
+  EvalState :: ( SlotConstraint slots) => {
       _entity      :: Spec slots surface st q loc
     , _state       :: st
     , _storage     :: Rec (MkStorage slots)
     , _surface     :: surface 
-    , _location    :: Path root loc  
-    , _environment :: Entity root -- maybe not
+    , _location    :: Path root (loc :> 'Leaf_ (Slot i surface slots q))
+    , _environment :: TMVar (Entity root) -- maybe not
   } -> EvalState root loc slots surface st q 
 
 -- | Existential wrapper over the EvalState record. 
-data ExEvalState :: SlotData ->  Type -> Row SlotData -> (Type -> Type) -> Type where
+data ExEvalState :: SlotData ->  PathDir -> Type -> Row SlotData -> (Type -> Type) -> Type where
   ExEvalState :: EvalState root loc slots surface st q
-              -> ExEvalState root surface slots q
+              -> ExEvalState root loc surface slots q
 
 -- | `Transformer surface query` is a newtype wrapper over `forall x. query x -> IO (x,ExEvalState surface query)`
 --  
 --   This mainly serves to make reasoning about the EntityStore comonad less painful, and to 
 --   make type signatures far more readable. 
-newtype Transformer root surface slots query = Transformer {transform :: forall x. query x -> IO (x,ExEvalState root  surface slots query)}
+newtype Transformer root loc surface slots query = Transformer {transform :: forall x. query x -> IO (x,ExEvalState root loc surface slots query)}
 
 -- | `EntityStore surface query` == `Store (ExEvalState surface query) (Transformer surface query)`
 -- 
@@ -280,8 +272,8 @@ newtype Transformer root surface slots query = Transformer {transform :: forall 
 --   functionality *combined* with comonad-functionality: We can extract the state. 
 -- 
 --   But mainly this is what it is because Store is my favorite comonad and I jump at any chance to use it :) 
-type EntityStore ::  SlotData -> Type -> Row SlotData -> (Type -> Type) -> Type 
-type EntityStore root surface children query = Store (ExEvalState root surface children query) (Transformer root surface children query)
+type EntityStore ::  SlotData -> PathDir -> Type -> Row SlotData -> (Type -> Type) -> Type 
+type EntityStore root loc surface children query = Store (ExEvalState root loc surface children query) (Transformer root loc surface children query)
 
 -- | `Entity surface query` is a newtype wrapper over `TVar (EntityStore surface query)`
 --  
@@ -289,7 +281,7 @@ type EntityStore root surface children query = Store (ExEvalState root surface c
 type Entity :: SlotData -> Type 
 data Entity slot where 
   Entity :: (SlotOrdC '(i,su,RenderTree cs,q)) 
-         => TVar (EntityStore root su cs q) -> Entity '(i,su,RenderTree cs,q)
+         => TVar (EntityStore root loc su cs q) -> Entity '(i,su,RenderTree cs,q)
 
 -- | `Tell query` ==  `() -> query ()` 
 type Tell query = () -> query ()
@@ -536,7 +528,7 @@ instance Normalized old => Normalized (old :> 'Down_ b)
 type family Last (p :: PathDir) :: (T (Row SlotData) Symbol SlotData) where 
   Last ('Begin t) = t 
   Last (a :> b)   = b  
-
+{--
 type ConnectableF :: PathDir -> Symbol -> PathDir -> Constraint 
 class ConnectableF p1 l  p2
 
@@ -544,17 +536,23 @@ instance ( KnownSymbol l
         , HasType l slot cs) => ConnectableF (old :> 'Leaf_ slot) l ('Begin ('Leaf_ slot)) 
 
 instance ConnectableF (old :> 'Leaf_ slot) l  a => ConnectableF (old :> 'Leaf_ slot) l  a 
-
+--}
 type Connected :: PathDir -> PathDir -> PathDir 
 type family Connected p1 p2 where 
-  Connected (old :> 'Leaf_ slot) ('Begin ('Leaf_ slot))         =  (old :> 'Leaf_ slot)
-  Connected old (new1 :> new2) = Connected old new1 :> new2 
+  Connected ('Begin ('Leaf_ slot)) ('Begin ('Leaf_ slot))
+    =  ('Begin ('Leaf_ slot))
+
+  Connected (old :> 'Leaf_ slot) ('Begin ('Leaf_ slot)) 
+    =  (old :> 'Leaf_ slot)
+
+  Connected old (new1 :> new2)
+    = Connected old new1 :> new2 
 
 type Connectable :: PathDir -> Trail -> PathDir -> Constraint 
 class Last p2 ~ Last (Connected (old :> p1) p2) => Connectable old p1 p2 where 
   connect' :: Path root (old :> p1) -> Path slot p2 -> Path root (Connected (old :> p1) p2)
 
-instance Connectable (old :> 'Branch_ (l ':= slot)) ('Leaf_ slot)  ('Begin ('Leaf_ slot)) where 
+instance Connectable old ('Leaf_ slot)  ('Begin ('Leaf_ slot)) where 
            connect' (Leaf i rest) Start = Leaf i rest 
 
 instance Connectable old p1 p2  => Connectable old p1 (p2 :> 'Leaf_ slot) where 
@@ -575,20 +573,30 @@ instance Connectable old p1 p2 => Connectable old p1 (p2 :> 'Branch_ (l ':= Slot
   connect' old = \case 
     Branch path -> Branch $ connect' @old @p1 @p2 old path 
 
-class (  Normalize (Connected (old :> 'Leaf_ slot) new)
-       , Connectable old ('Leaf_ slot) new 
-       , Normalized (NormalizeF (Connected (old :> 'Leaf_ slot ) new))
-      ) => CompatibleC slot new old  where 
+type ConnectHelper :: PathDir -> PathDir -> Constraint 
+type family ConnectHelper p1 p2 where 
+  ConnectHelper (old :> p1) p2 = Connectable old p1 p2 
+
+class (forall slot. Connectable old ('Leaf_ slot) p2) => Connectable_ old p2 where 
+  connect'' ::  forall slot root
+             . (Connectable old ('Leaf_ slot) p2, Normalize (Connected (old :> 'Leaf_ slot) p2))
+            => Path root (old :> 'Leaf_ slot) 
+            -> Path slot p2 
+            -> Path root (Connected (old :> 'Leaf_ slot) p2)
+  connect'' = connect' 
+
+instance  (forall slot. Connectable old ('Leaf_ slot) p2) => Connectable_ old p2
+
+
+class  Connectable old ('Leaf_ slot) new  => CompatibleC slot old new where 
             mergePaths :: forall root 
-                        . Path root (old :> 'Leaf_ slot)
+                        . (Connectable old ('Leaf_ slot) new, Normalize (Connected (old :> 'Leaf_ slot) new))
+                       => Path root (old :> 'Leaf_ slot)
                        -> Path slot new 
                        -> NormalizedPath root (NormalizeF (Connected (old :> 'Leaf_ slot)  new))
-            mergePaths p1 p2 = normalize $ connect' @old @('Leaf_ slot) @new p1 p2 
+            mergePaths p1 p2 = normalize $ connect' @old  @('Leaf_ slot) @new @root p1 p2 
 
-instance ( Normalize (Connected (old :> 'Leaf_ slot) new)
-         , Connectable old ('Leaf_ slot) new 
-         , Normalized (NormalizeF (Connected (old :> 'Leaf_ slot ) new))
-         ) => CompatibleC slot new old 
+instance Connectable old ('Leaf_ slot) new  => CompatibleC slot old new
 
 
  
