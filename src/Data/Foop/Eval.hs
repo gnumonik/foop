@@ -62,9 +62,9 @@ withExEval (ExEvalState e) f = f e
 new_ :: forall index surface slots query context loc root 
         . ( Ord index
           , Forall slots SlotOrdC)
-       => Path root loc 
+       => Path root (loc :> 'Leaf_ (Slot index surface slots query)) 
        -> TMVar (Entity root)
-       -> Model surface slots query loc
+       -> Model surface slots query ('Begin :> 'Leaf_ (Slot index surface slots query))
        -> IO (Entity (Slot index surface slots query))
 new_ path tmv (Model spec@(MkSpec iState qHandler renderR slots)) = do 
   let eState = initE path tmv spec 
@@ -83,7 +83,7 @@ new_' :: forall surface slots query i state
           , SlotOrdC (Slot () surface slots query)
           , SlotConstraint slots 
           )
-       => Spec slots surface state query ('Begin ('Leaf_ (Slot () surface slots query)))
+       => Spec slots surface state query ('Begin :> 'Leaf_ (Slot () surface slots query) )
        -> Rec (MkStorage slots) 
        -> surface 
        -> RenderTree slots 
@@ -104,12 +104,12 @@ new_' spec@MkSpec{..} storage surface tree cxt  =  do
     pure $  Entity eStore
 
 -- | Initializes an EvalState given a Spec 
-initE :: forall slots surface st q loc  root
-       . ( SlotConstraint slots)
-      => Path  root loc 
+initE :: forall slots surface st q loc  root i
+       . ( SlotConstraint slots, Ord i)
+      => Path  root (loc :> 'Leaf_ (Slot i surface slots q)) 
       -> TMVar (Entity root)
-      -> Spec slots surface st q loc
-      -> EvalState root loc slots surface st q 
+      -> Spec slots surface st q ('Begin :> 'Leaf_ (Slot i surface slots q))
+      -> EvalState root (loc :> 'Leaf_ (Slot i surface slots q)) slots surface st q 
 initE path tmv espec@MkSpec{..}
   = EvalState {_entity      = espec
               ,_state       = initialState
@@ -121,15 +121,15 @@ initE path tmv espec@MkSpec{..}
 
 -- | Constructs and EntityStore from an EvalState 
 mkEntity_ :: forall slots surface  st query root loc i
-           . EvalState root loc slots surface st query 
-          -> EntityStore root loc surface slots query
-mkEntity_ e = store go (ExEvalState e)
+           . Ord i 
+          => EvalState root (loc :> 'Leaf_ (Slot i surface slots query)) slots surface st query 
+          -> EntityStore root (loc :> 'Leaf_ (Slot i surface slots query)) surface slots query
+mkEntity_ e@EvalState{..} = store go (ExEvalState e)
   where
-    go :: ExEvalState root loc surface slots query 
-       -> Transformer root loc surface slots query
-    go ex@(ExEvalState (EvalState entity sta str su loc env)) = Transformer $ \qx -> 
-      case entity  of
-        MkSpec  iState hQuery rendr proxy -> 
+    go :: ExEvalState root (loc :> 'Leaf_ (Slot i surface slots query)) surface slots query 
+       -> Transformer root (loc :> 'Leaf_ (Slot i surface slots query)) surface slots query
+    go ex@(ExEvalState (EvalState entity@(MkSpec iState hQuery rendr proxy) sta str su loc env)) 
+      = Transformer $ \qx -> 
           case apNT hQuery (Q . liftCoyoneda $ qx)  of 
             EntityM m -> do  
               let st = foldF (evalF (EvalState entity sta str su loc env)) m
@@ -261,10 +261,11 @@ apNTWithContext box handler qx = unboxContext box go
     go d@Dict tv = case instHandler @cxt handler of 
       nt -> apNT nt qx 
 --}
-evalF :: forall slots surface state query root loc a 
-    .  EvalState root loc slots surface state query
-    -> EntityF loc slots state query IO a
-    -> ST.StateT (ExEvalState root loc surface slots query) IO a
+evalF :: forall slots surface state query root loc a i
+    .  Ord i 
+    => EvalState root (loc :> 'Leaf_ (Slot i surface slots query)) slots surface state query
+    -> EntityF (loc :> 'Leaf_ (Slot i surface slots query)) slots state query IO a
+    -> ST.StateT (ExEvalState root (loc :> 'Leaf_ (Slot i surface slots query)) surface slots query) IO a
 evalF eState@EvalState{..} = \case
 
   State f -> case f _state of

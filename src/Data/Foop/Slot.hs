@@ -189,8 +189,8 @@ deNormalize = \case
   Start' -> Start 
   Branch' SlotKey np -> Branch  (deNormalize np) 
   Leaf' i np -> Leaf i (deNormalize np)
-  Down1 np -> Down (deNormalize np)
-  Down2 np -> Down (deNormalize np)
+  Down' np -> Down (deNormalize np)
+
 
 (||>) :: Path root old -> (Path root old -> Path root new) -> Path root new 
 a ||> f = f a 
@@ -209,38 +209,37 @@ doop2 =   Start
       ||> Branch @"rootSlotA" 
 
 type family Target (p :: PathDir) :: T (Row SlotData) Symbol SlotData where 
-  Target ('Begin l) = l 
   Target (a :> b)   = b 
 
 class Certainly (slot :: SlotData) (p :: PathDir) where 
   mkGetter :: NormalizedPath slot p -> Getter (RenderLeaf slot) (TraceS p)
 
-instance Certainly (Slot i su cs q) ('Begin ('Leaf_ (Slot i su cs q))) where 
+instance Certainly (Slot i su cs q) ('Begin :> 'Leaf_ (Slot i su cs q)) where 
   mkGetter Start' = to id
 
 instance Certainly root (old :> 'Down_ slots) => Certainly root ((old :> 'Down_ slots) :> 'Branch_ (l ':= Slot i su cs q)) where 
   mkGetter (Branch' key old) = mkGetter old . to (lookupSurface key)
 
-instance  Certainly (Slot i su cs q) ('Begin ('Leaf_ (Slot i su cs q)) :> 'Down_ cs) where 
-  mkGetter (Down1 Start') = to $ \(MkRenderLeaf su cs) -> cs
+instance  Certainly (Slot i su cs q) ('Begin :> 'Leaf_ (Slot i su cs q) :> 'Down_ cs) where 
+  mkGetter (Down' Start') = to $ \(MkRenderLeaf su cs) -> cs
 
 class Possibly (slot :: SlotData) (p :: PathDir) where 
   mkFold :: NormalizedPath slot p -> Fold (RenderLeaf slot) (TraceS p)
-
-instance Possibly (Slot i su cs q) ('Begin ('Leaf_ (Slot i su cs q))) where 
+{--
+instance Possibly (Slot i su cs q) ('Begin :> 'Leaf_ (Slot i su cs q)) where 
   mkFold Start' = to id
-
+--}
 instance Possibly root (old :> 'Down_ slots) => Possibly root ((old :> 'Down_ slots) :> 'Branch_ (l ':= Slot i su cs q)) where 
   mkFold (Branch' key old) = mkFold old . to (lookupSurface key)
 
-instance  Possibly (Slot i su cs q) ('Begin ('Leaf_ (Slot i su cs q)) :> 'Down_ cs) where 
-  mkFold (Down1 Start') = to $ \(MkRenderLeaf su cs) -> cs
+instance  Possibly (Slot i su cs q) ('Begin :> 'Leaf_ (Slot i su cs q) :> 'Down_ cs) where 
+  mkFold (Down' Start') = to $ \(MkRenderLeaf su cs) -> cs
 
 instance Possibly root (old :> 'Branch_ (l ':= Slot i su cs q)) => Possibly root (old :> 'Branch_ (l ':= Slot i su cs q) :> 'Leaf_ (Slot i su cs q)) where 
   mkFold (Leaf' i old) = mkFold old . leaf i
 
 instance Possibly root (old1 :> 'Leaf_ (Slot i su cs q)) => Possibly root (old1 :> 'Leaf_ (Slot i su cs q) :> 'Down_ cs) where 
-  mkFold (Down2 old) = mkFold old . to (\(MkRenderLeaf su cs) -> cs)
+  mkFold (Down' old) = mkFold old . to (\(MkRenderLeaf su cs) -> cs)
 
 fetch :: Certainly root path => NormalizedPath root path -> RenderLeaf root -> TraceS path 
 fetch npath leaf = leaf ^. mkGetter npath 
@@ -272,7 +271,7 @@ testRLeaf = undefined
 
 bebop3 =  normalize (applyPath @MySlot doop3)
 
-pth = search yoyo testRLeaf 
+-- pth = search yoyo testRLeaf 
 
 bodoop :: forall t slot. t ~ Maybe (RenderLeaf slot) => Maybe (RenderLeaf slot) -> Proxy (Maybe (RenderLeaf slot))
 bodoop _ = Proxy 
