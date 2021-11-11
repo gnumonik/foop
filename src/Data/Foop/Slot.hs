@@ -25,6 +25,7 @@ import GHC.Base (Any)
 import Control.Lens (Optic', Profunctor, Lens')
 import Data.Singletons.Prelude.Eq
 import Data.Singletons (KindOf)
+import qualified Data.Constraint.Forall as DC
 
 -- | Given an Entity, renders its surface. Doesn't run the IO action.
 observeE :: forall slot
@@ -253,6 +254,13 @@ applyPath path = path
 applyPathN :: forall slot t. NormalizedPath slot t -> NormalizedPath slot t 
 applyPathN path = path 
 
+applyAtlas :: forall slot paths. Atlas slot paths -> Atlas slot paths 
+applyAtlas = id 
+
+
+hmbm = applyAtlas @MySlot debop 
+
+debop =  AddPath (Start ||> Down) Empty 
 
 doop3 = Start ||> Down ||> Branch @"rootSlotA" ||> Leaf True ||> Up
 
