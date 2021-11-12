@@ -197,8 +197,6 @@ type CountersSlots = "counterA" .== Slot String String Empty CounterLogic
 --mkCounters :: Prototype String CountersLogic
 
 
-
-
 counters = Model $  MkSpec {
     initialState = ()
   , handleQuery = queryHandler runCounters 
