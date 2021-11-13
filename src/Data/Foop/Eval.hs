@@ -59,14 +59,14 @@ withExEval :: forall query surface slots root loc r
 withExEval (ExEvalState e) f = f e
 
 -- | Constructs an entity from a model
-new_ :: forall index surface slots query context loc loc' root 
+new_ :: forall index surface slots query context deps root 
         . ( Ord index
           , Forall slots SlotOrdC
-          ) => Path  loc 
-            -> TMVar (Entity root)
-            -> Model surface slots query loc'
+          ) => Path root 
+            -> TMVar (Entity (RootOf root))
+            -> Model root surface slots query deps index 
             -> IO (Entity (Slot index surface slots query))
-new_ path tmv (Model spec@(MkSpec iState qHandler renderR slots)) = do 
+new_ path tmv (Model spec@(MkSpec iState qHandler renderR slots deps)) = do 
   let eState = initE path tmv spec 
   e <- newTVarIO $ mkEntity_ @index eState 
   pure $ Entity e 
@@ -78,19 +78,18 @@ new_ path tmv (Model spec@(MkSpec iState qHandler renderR slots)) = do
     pure $  Entity eStore
 --}
 -- | Constructs an entity from a model
-new_' :: forall surface slots query i state  
+new_' :: forall root surface slots query i state deps 
         . ( Forall slots SlotOrdC
-          , SlotOrdC (Slot () surface slots query)
           , SlotConstraint slots
           )
-       => Spec slots surface state query ('Begin :> 'Leaf_ (Slot () surface slots query) )
+       => Spec ('Begin ':> 'Leaf_ (Slot () surface slots query)) slots surface state query deps i  
        -> Rec (MkStorage slots) 
        -> surface 
        -> RenderTree slots 
        -> TVar (RenderLeaf (Slot () surface slots query)) 
        -> IO (Entity '((),surface,RenderTree slots,query))
 new_' spec@MkSpec{..} storage surface tree cxt  =  do
-    env <- newEmptyTMVarIO 
+    env :: TMVar (Entity (Slot () surface slots query)) <- newEmptyTMVarIO 
     let evalSt = EvalState {_entity      = spec 
                            ,_state       = initialState 
                            ,_storage     = storage 
@@ -104,13 +103,12 @@ new_' spec@MkSpec{..} storage surface tree cxt  =  do
     pure $  Entity eStore
 
 -- | Initializes an EvalState given a Spec 
-initE :: forall slots surface st q loc1 loc2  root i
-       . ( SlotConstraint slots, Ord i, Last loc1 ~ 'Leaf_ (Slot i surface slots q)
-         , Normalize (Connected loc1 loc2))
-      => Path  loc1  
-      -> TMVar (Entity root)
-      -> Spec slots surface st q loc2
-      -> EvalState  (NormalizeF (Connected loc1 loc2 )) slots surface st q 
+initE :: forall slots surface st q deps  root i
+       . ( SlotConstraint slots)
+      => Path root 
+      -> TMVar (Entity (RootOf root))
+      -> Spec root slots surface st q deps i
+      -> EvalState root deps slots surface st q 
 initE path tmv espec@MkSpec{..}
   = EvalState {_entity      = espec
               ,_state       = initialState
@@ -121,19 +119,19 @@ initE path tmv espec@MkSpec{..}
               }
 
 -- | Constructs and EntityStore from an EvalState 
-mkEntity_ :: forall i slots surface  st query root loc 
-           . (Ord i, Last loc ~ 'Leaf_ (Slot i surface slots query))
-          => EvalState root loc  slots surface st query 
-          -> EntityStore root loc surface slots query
+mkEntity_ :: forall i slots surface  st query root deps
+           . (Ord i)
+          => EvalState root deps  slots surface st query 
+          -> EntityStore root deps surface slots query
 mkEntity_ e@EvalState{..} = store go (ExEvalState e)
   where
     go :: ExEvalState root loc surface slots query 
        -> Transformer root loc surface slots query
-    go ex@(ExEvalState est@(EvalState entity@(MkSpec iState hQuery rendr proxy) sta str su loc env)) 
+    go ex@(ExEvalState est@(EvalState entity@(MkSpec iState hQuery rendr proxy deps) sta str su loc env)) 
       = Transformer $ \qx -> 
           case apNT hQuery (Q . liftCoyoneda $ qx)  of 
             EntityM m -> do  
-              let st = foldF (evalF @i (EvalState entity sta str su loc env)) m
+              let st = foldF (evalF  (EvalState entity sta str su loc env)) m
               ST.runStateT st ex
 --}
 -- don't export this
@@ -143,7 +141,7 @@ run i (Entity tv) = do
   e <- readTVarIO tv  -- reads the store from the tvar 
   Transformer f <- pure $ extract e 
   (x,st) <- f i -- apply the i-o transformer to some input 
-  let newObj = withExEval st $ \x ->  mkEntity_ x  -- recreate the store comonad thingy from the new state 
+  let newObj = withExEval st $ \x ->  mkEntity_ @i x  -- recreate the store comonad thingy from the new state 
   atomically $ writeTVar tv newObj -- write new store thingy to tvar 
   pure x
 
@@ -262,11 +260,10 @@ apNTWithContext box handler qx = unboxContext box go
     go d@Dict tv = case instHandler @cxt handler of 
       nt -> apNT nt qx 
 --}
-evalF :: forall i slots surface state query root loc a
-    .  (Ord i, Last loc ~ 'Leaf_ (Slot i surface slots query))
-    => EvalState root loc slots surface state query
-    -> EntityF loc slots state query IO a
-    -> ST.StateT (ExEvalState root (loc ) surface slots query) IO a
+evalF :: forall  slots surface state query root deps a
+    .  EvalState root deps slots surface state query
+    -> EntityF deps slots state query IO a
+    -> ST.StateT (ExEvalState root deps surface slots query) IO a
 evalF eState@EvalState{..} = \case
 
   State f -> case f _state of
@@ -287,7 +284,7 @@ evalF eState@EvalState{..} = \case
       pure $ withDict d (leaf ^. g)
 --}
   Query q -> case _entity of 
-    MkSpec iState hQuery renderR proxy -> 
+    MkSpec iState hQuery renderR proxy deps -> 
       case apNT hQuery (Q q) of
         EntityM ef -> foldF (evalF (EvalState {..})) ef
 
@@ -295,7 +292,8 @@ evalF eState@EvalState{..} = \case
 
   -- GHC doesn't get as mad if we do line-by-line "imperative style" vs trying to compose everything together
   Create slot i e' a -> case slot of
-    SlotKey -> do
+    SlotKey -> undefined {-- 
+                do
       e <- liftIO $ new_ (_location ) _environment e' 
       lift (atomically $ observeE e) >>= \x@(MkRenderLeaf su cs) -> do
           ST.modify' $ \_ -> withDict (deriveStoreHas slot)
@@ -303,7 +301,7 @@ evalF eState@EvalState{..} = \case
                                                       MkStorageBox  $ M.insert (Indexed Index i) e m) _storage
                                     ,..}
           pure a
-
+--}
   Delete slot i a -> case slot of
     SlotKey -> do
       ST.modify' $ \_ ->

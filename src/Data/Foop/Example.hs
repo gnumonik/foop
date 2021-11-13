@@ -7,7 +7,7 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad ( replicateM_ ) 
 import Data.Functor ((<&>))
 import Control.Monad.State.Class ( MonadState(get), modify' ) 
-import Data.Row ( Empty, type (.==), type (.+) ) 
+import Data.Row ( Empty, type (.==), type (.+), (.==) ) 
 import Data.Proxy (Proxy (Proxy)) 
 import Control.Concurrent.STM () 
 import Data.Row.Internal
@@ -17,6 +17,7 @@ import Control.Monad.Identity
 import Data.Constraint
 import Data.Foop.Slot
 import Control.Lens (view, (^?))
+import qualified Data.Row.Records as R
 
 
 -- Example #1: A Simple Counter 
@@ -64,13 +65,16 @@ defaultSpec = MkSpec () (queryHandler $ \(Identity x) -> pure x) (mkSimpleRender
 
 
 
+noDeps :: (Map (Rooted root slot) paths ~ 'R '[]) => Atlassed root slot paths
+noDeps = MkAtlassed R.empty 
 
-
+counter :: forall root i. Ord i => Model root String Empty CounterLogic Empty i
 counter =  Model $ MkSpec {
     initialState = 0 :: Int
   , handleQuery  = queryHandler runCounterLogic 
   , renderer     = mkSimpleRender show  -- this is a function from the component's state to its surface
   , slots        = emptySlots 
+  , dependencies = noDeps 
   }
 
 -- runCounterLogic :: CounterLogic ~> EntityM Empty Int CounterLogic IO
@@ -197,21 +201,34 @@ type CountersSlots = "counterA" .== Slot String String Empty CounterLogic
 --mkCounters :: Prototype String CountersLogic
 
 
-counters = Model $  MkSpec {
+
+
+reifyModel :: forall i root su cs q deps 
+            . Model root su cs q deps i 
+           -> Model root su cs q deps i 
+reifyModel = id 
+
+
+
+
+
+
+counters = reifyModel @Int $ Model $  MkSpec {
     initialState = ()
   , handleQuery = queryHandler runCounters 
   , renderer = mkSimpleRender show
   , slots = Proxy @CountersSlots
+  , dependencies = MkAtlassed (#here .== MkRooted Start) 
   }
  where
   -- runCounters ::  CountersLogic ~> EntityM CountersSlots () CountersLogic IO 
    runCounters = \case 
     NewCounterA n x -> do 
-      create @"counterA" n counter
+  --    create @"counterA" n counter
       pure x  
 
     NewCounterB n x -> do 
-      create @"counterB" n counter
+     -- create @"counterB" n counter
       pure x  
 
     DeleteCounter k x -> do  

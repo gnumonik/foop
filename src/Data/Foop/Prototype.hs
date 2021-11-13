@@ -45,12 +45,6 @@ mkSimpleRender :: (state -> surface)
                -> Renderer state surface 
 mkSimpleRender f = MkRenderer f (const $ pure ()) 
 
-instHandler :: forall loc slots state query. 
-               QHandler query loc slots state 
-            -> AlgebraQ query :~> EntityM loc slots state query IO
-instHandler (MkQHandler  handler) 
-  =  NT $ \(Q q) -> unCoyoneda (\g -> fmap g . handler) q 
-
 
 
 

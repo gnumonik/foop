@@ -17,7 +17,7 @@ import Data.Proxy
 import Control.Comonad.Store
 import Control.Concurrent.STM.TVar
 import Control.Monad.Free.Church
-import Data.Row.Internal ( Extend, Row(R), LT((:->)) )
+import Data.Row.Internal ( Extend, Row(R), LT((:->)), FrontExtends (frontExtendsDict), FrontExtendsDict (FrontExtendsDict) )
 import Data.Default
 import qualified Data.Row.Records as R
 import Data.Constraint
@@ -27,6 +27,8 @@ import Control.Lens.Getter
 import Data.Type.Equality (type (:~:))
 import Control.Concurrent.STM (TMVar)
 import Data.Functor.Constant
+import Data.Row.Dictionaries (IsA(..),As(..),ActsOn(..),As'(..))
+
 
 {-- 
 
@@ -100,7 +102,7 @@ data EntityF deps slots state query m a where
   Create   :: SlotKey l slots (Slot i su cs q)
            -> i
            -- probably going to need some kind of normalize constraint 
-           -> Model su cs q new
+           -> Model r su cs q new i 
            -> a 
            -> EntityF deps slots state query m a
 
@@ -189,11 +191,11 @@ data Prototype :: Type -> Row SlotData -> (Type -> Type) -> SlotData -> Type whe
             -> Prototype surface slots query context 
 --}
 
-data Model :: Type -> Row SlotData -> (Type -> Type) -> Row PathDir -> Type where 
-  Model :: forall surface slots query state loc 
+data Model :: PathDir -> Type -> Row SlotData -> (Type -> Type) -> Row PathDir -> Type -> Type where 
+  Model :: forall root surface slots query state loc i
          . (SlotConstraint slots)
-        =>  Spec slots surface state query loc
-        -> Model surface slots query loc
+        =>  Spec root slots surface state query loc i
+        -> Model root surface slots query loc i 
 
 -- | `~>` is a type synonym for natural transformations (generally between functors
 --   but that constraint can't be expressed here).
@@ -223,16 +225,16 @@ newtype Handler query state slots loc
       :: forall r. ((forall x. query x -> EntityM loc slots state query IO x) -> r) -> r}
 
 -- | A `Spec` is the GADT from which an Entity is constructed. 
-type Spec :: Row SlotData -> Type -> Type -> (Type -> Type) -> Row PathDir -> Type
-data Spec slots surface state query c where
+type Spec :: PathDir -> Row SlotData -> Type -> Type -> (Type -> Type) -> Row PathDir -> Type -> Type
+data Spec root slots surface state query c  i where
   MkSpec ::
-   ( WellBehaved slots, Ord i) => 
+   ( WellBehaved slots) => 
     { initialState   :: state 
-    , handleQuery    :: AlgebraQ query :~> EntityM loc slots state query IO 
+    , handleQuery    :: AlgebraQ query :~> EntityM deps slots state query IO 
     , renderer       :: Renderer state surface 
     , slots          :: Proxy slots
-    , dependencies   :: Atlassed (Slot i surface slots query) o
-    } -> Spec slots surface state query loc
+    , dependencies   :: Atlassed root (Slot i surface slots query) deps 
+    } -> Spec root slots surface state query deps i  
 
 -- | `AlgebraQ query a` is a wrapper around a type which records a query algebra. 
 --   
@@ -243,29 +245,29 @@ newtype AlgebraQ query a =  Q (Coyoneda query a)
 
 -- | Evaluation State. Holds the Prototype Spec, the Prototype's State, 
 --   and a Context which can be read from inside the Prototype monad 
-type EvalState ::  Row PathDir -> Row SlotData -> Type -> Type -> (Type -> Type) -> Type
-data EvalState  loc slots surface st q where 
-  EvalState :: (SlotConstraint slots, Ord i) => {
-      _entity      :: Spec slots surface st q loc 
+type EvalState ::  PathDir -> Row PathDir -> Row SlotData -> Type -> Type -> (Type -> Type) -> Type
+data EvalState  root deps slots surface st q where 
+  EvalState :: (SlotConstraint slots) => {
+      _entity      :: Spec root slots surface st q deps i
     , _state       :: st
     , _storage     :: Rec (MkStorage slots)
     , _surface     :: surface 
-  --  , _location    :: Path loc
-  --  , _environment :: CompatiBox loc -- maybe not
-  } -> EvalState loc slots surface st q 
+    , _location    :: Path root 
+    , _environment :: TMVar (Entity (RootOf root)) -- maybe not
+  } -> EvalState root deps slots surface st q 
 
 -- | Existential wrapper over the EvalState record. 
-data ExEvalState :: SlotData ->  Row PathDir -> Type -> Row SlotData -> (Type -> Type) -> Type where
-  ExEvalState :: ( SlotConstraint slots, Ord i) 
-              => EvalState  loc slots surface st q
-              -> ExEvalState root loc surface slots q
+data ExEvalState :: PathDir -> Row PathDir -> Type -> Row SlotData -> (Type -> Type) -> Type where
+  ExEvalState :: ( SlotConstraint slots) 
+              => EvalState  root deps slots surface st query 
+              -> ExEvalState root deps surface slots query  
 
 -- | `Transformer surface query` is a newtype wrapper over `forall x. query x -> IO (x,ExEvalState surface query)`
 --  
 --   This mainly serves to make reasoning about the EntityStore comonad less painful, and to 
 --   make type signatures far more readable. 
 data Transformer root loc surface slots query where 
-   Transformer :: (Ord i) => 
+   Transformer :: 
      (forall x. query x -> IO (x,ExEvalState root loc surface slots query)) -> Transformer root loc surface slots query 
 
 -- | `EntityStore surface query` == `Store (ExEvalState surface query) (Transformer surface query)`
@@ -283,7 +285,7 @@ data Transformer root loc surface slots query where
 --   functionality *combined* with comonad-functionality: We can extract the state. 
 -- 
 --   But mainly this is what it is because Store is my favorite comonad and I jump at any chance to use it :) 
-type EntityStore ::  SlotData -> Row PathDir -> Type -> Row SlotData -> (Type -> Type) -> Type 
+type EntityStore ::  PathDir -> Row PathDir -> Type -> Row SlotData -> (Type -> Type) -> Type 
 type EntityStore root loc surface children query = Store (ExEvalState root loc surface children query) (Transformer root loc surface children query)
 
 -- | `Entity surface query` is a newtype wrapper over `TVar (EntityStore surface query)`
@@ -427,11 +429,13 @@ testEntailment = mapDict (derive @c1 @c2 @a) Dict
 data (:=) a b = a := b deriving (Show, Eq)
 infixr 8 := 
 
-data Rooted :: SlotData -> PathDir -> Type where 
-  MkRooted :: Path path -> Rooted (RootOf path) path 
+data Rooted :: PathDir -> SlotData -> PathDir -> Type where 
+  MkRooted :: forall root path
+            . Compatible root path 
+           => Path path -> Rooted root (RootOf path) path 
 
-data Atlassed :: SlotData -> Row PathDir -> Type where 
-  MkAtlassed :: Rec (R.Map (Rooted slot) paths) -> Atlassed slot paths 
+data Atlassed :: PathDir -> SlotData -> Row PathDir -> Type where 
+  MkAtlassed :: Rec (R.Map (Rooted root slot) paths) -> Atlassed root slot paths 
              
 data Atlas :: SlotData -> [PathDir] -> Type where 
   FirstPath :: forall path. Path path -> Atlas (RootOf path) '[path]
@@ -551,18 +555,189 @@ type family LeafMe (t :: Trail) :: SlotData where
 
 type TestPath = 'Begin :> 'Leaf_ (Slot Int Int Empty Maybe)
 
-data EleC :: PathDir -> k -> [k] -> Type where 
-  El1 :: Compatible root k => EleC root k '[k]
-  El2 :: Compatible root x => EleC k ks -> EleC k (x ': ks)
+data ElCompat :: PathDir -> LT PathDir -> [LT PathDir] -> Type where 
+  ElC1 :: (Compatible root k, KnownSymbol l) => ElCompat root (l ':-> k) '[l ':-> k]
+  ElCS :: (Compatible root x, KnownSymbol l) => ElCompat root (l' ':-> old) ((l' ':-> old) ': lts) -> ElCompat root (l ':-> x) (l ':-> x ': l' ':-> old ': lts)
 
-type El :: k  -> [k] -> Constraint 
-class El k ks where 
-  el :: Ele k ks 
+elLabel :: forall root l p ps
+         . ElCompat root (l ':-> p) ps
+        -> Label l 
+elLabel = \case 
+  ElC1 -> Label @l 
+  ElCS old -> Label @l
 
-instance El a '[a] where 
-  el = El1
-instance {-# OVERLAPS #-} El a as => El a (x ': as) where 
-  el = El2 el  
+type ElC :: PathDir -> LT PathDir -> [LT PathDir] -> Constraint 
+class ElC root path paths where 
+  el :: ElCompat root path paths  
+
+instance (Compatible root path, KnownSymbol l) => ElC root (l ':-> path) '[l ':-> path] where 
+  el = ElC1
+instance {-# OVERLAPS #-} (ElC root (l' ':-> old) (l' ':-> old ': paths), Compatible root new, KnownSymbol l) => ElC root (l ':-> new) (l ':-> new ': l' ':-> old ': paths) where 
+  el = ElCS $ el @root @(l' ':-> old) @(l' ':-> old ': paths) 
+
+type family Head (xs :: [k]) :: k where 
+  Head (x ': xs) = x 
+
+class ElC root (Head paths) paths => DeriveCompatible root paths where 
+  deriveCompatible :: ElCompat root (Head paths) paths   
+  deriveCompatible = el
+
+type family MapR_ (f :: a -> b) (r :: [LT a]) :: [LT b] where
+  MapR_ f '[l :-> v] = '[l :-> f v]
+  MapR_ f (l :-> v ': t) = l :-> f v ': MapR_ f t
+
+
+type Hm root = IsA (Compatible root) Path 
+
+elToRec :: forall root l p ps ps'  
+         . ( KnownSymbol l 
+           , ElC root (l ':-> p) (l ':-> p ': ps)
+           , Mapped Path ps' (l ':-> p ': ps)
+           , AllUniqueLabels (R (l ':-> p ': ps))
+           ) 
+        => NormalizedPath root 
+        -> Rec (R ps')
+        -> Rec (R.Map (ConstBox root) (R (l ':-> p ': ps)) )
+elToRec npath r = undefined  
+  where 
+    hmbam = undefined -- (ana (Label @l) (transmute  @Path  @ps' @(l ':-> p ': ps) r) el)
+{--
+    ana :: forall l p ps row
+         . (PopRec l p  (l ':-> p ': ps) ps)
+        => Label l 
+        -> MapBox Path (R (l ':-> p ': ps) )
+        -> ElCompat root (l ':-> p) (l ':-> p ': ps) 
+        -> (MapBox Path (R ps), ConstBox p p)
+    ana l (MapBox paths) = \case 
+      ElC1 -> case paths R..! l of 
+        p -> (EmptyBox,ConstBox (Constant (MkCompatiBox npath p)) )
+      ElCS rest -> case popEm @l @(Path p) paths of 
+--}
+    cata :: (Rec ('R (MapR_ Path ps)), ConstBox root p) -> Rec ('R ((l ':-> ConstBox root p) : MapR_ (ConstBox root) ps))
+    cata = undefined 
+
+instance ElC root (Head paths) paths => DeriveCompatible root paths
+
+class  UnfoldRec (c :: k -> Constraint) (f :: k -> Type) (row :: [LT Type])  where 
+  unfoldRec :: Proxy c -> Rec (R row) -> UnconsRec (R row) (UnconsBox c f) -- (f t, Rec (R ts))
+  --unconsRec aRec = (aRec R..! (Label @l), aRec R..- (Label @l))
+
+type UnconsRec ::  Row Type -> (Maybe (LT Type) -> Row Type -> Type) -> Type 
+type family UnconsRec row f where 
+  UnconsRec (R '[]) k = k 'Nothing (R '[])
+  UnconsRec (R (l ':-> f a ': as)) k = k ('Just (l ':-> f a)) (R as)
+
+data UnconsBox :: (k -> Constraint) -> (k -> Type) -> Maybe (LT Type) -> Row Type -> Type where 
+  DJust :: forall k (a :: k) (c :: k -> Constraint) (f :: k -> Type) l (as ::  [LT Type]) 
+         . (UnfoldRec c f as, c a,  KnownSymbol l) => Rec (R (l ':-> f a ': as)) -> UnconsBox c f ('Just (l ':-> f a)) (R as)
+  DNothing :: UnconsBox c f 'Nothing  (R '[])
+
+unboxCons :: forall k (f :: k -> Type) (c :: k -> Constraint) (a :: k) (rt :: [LT Type]) r l  
+           . UnconsBox c f ('Just (l ':-> f a))  (R rt)
+          -> ((UnfoldRec c f rt, KnownSymbol l, c a) => Label l -> f a -> Rec (R rt) -> r)
+          -> r 
+unboxCons d@(DJust aRec) f = f lbl (aRec R..! lbl) (aRec R..- lbl)
+  where 
+    lbl = getLbl d 
+
+    getLbl :: forall c f l x rx. UnconsBox c f ('Just (l ':-> x)) rx -> Label l 
+    getLbl (DJust _)= Label @l
+
+class TransformRec (c :: k -> Constraint) (f :: k -> Type) (g :: k -> Type) (r1 :: Row Type) (r2 :: Row Type) where 
+  transformRec :: Proxy c -> (forall x. c x => f x -> g x) -> Rec r1 -> Rec r2  
+
+instance ( UnfoldRec c f '[l ':-> f a]
+         , UnfoldRec c g '[l ':-> g a] 
+         , UnconsRec (R '[l ':-> f a]) (UnconsBox c f) ~ UnconsBox c f ('Just (l ':-> f a)) (R '[])
+         , UnconsRec (R '[l ':-> g a]) (UnconsBox c g) ~ UnconsBox c g ('Just (l ':-> g a)) (R '[])
+         ) => TransformRec c f g (R '[l ':-> f a]) (R '[l ':-> g a])  where 
+                transformRec Proxy f r1 = case unfoldRec (Proxy @c) r1 of 
+                  consbox -> unboxCons consbox $ \lbl fa _ -> lbl .== f fa
+{--
+instance ( UnfoldRec c f (l ':-> f a ': r1)
+         , UnfoldRec c g (l ':-> g a ': r2 )
+         , UnconsRec (R (l ':-> f a ': r1)) (UnconsBox c f) ~ UnconsBox c f ('Just (l ':-> f a)) (R r1) 
+         , UnconsRec (R (l ':-> g a ': r2)) (UnconsBox c g) ~ UnconsBox c g ('Just (l ':-> g a)) (R r2) 
+         , TransformRec c f g (R r1) (R r2)
+         , FoldRec c l a f g r2
+         ) => TransformRec c f g (R (l ':-> f a ': r1)) (R (l ':-> g a ': r2 )) where 
+                transformRec proxy f rx = case unfoldRec (Proxy @c) rx of 
+                  box@(DJust rest) -> unboxCons box $ \lbl fa rest ->  case transformRec proxy f rest :: Rec (R r2) of 
+--}
+
+
+
+
+class ( KnownSymbol l
+      , FrontExtends l (g a) (R ys)
+      , c a
+      , AllUniqueLabels (Extend l (g a) (R ys))
+      ) => FoldRec (c :: k -> Constraint) (l :: Symbol) (a :: k) (f :: k -> Type) (g :: k -> Type) (ys :: [LT Type]) where 
+  type Folded l g a ys :: Row Type 
+  type Folded l g a ys = Extend l (g a) (R ys)
+
+  foldRec :: c a => Label l -> f a -> (forall x. c x => f x -> g x) -> Rec (R ys) -> Rec (Extend l (g a) (R ys))
+  foldRec lbl fa f r = R.extend lbl (f fa) r
+
+instance (KnownSymbol l, c a) => FoldRec c l a f g '[]
+
+instance ( KnownSymbol l
+      , FrontExtends l (g a) (R (y ': ys))
+      , c a
+      , AllUniqueLabels (Extend l (g a) (R (y ': ys)))
+      ) => FoldRec c l a f g (y ': ys)
+
+-- instance TransformRec 
+
+foldRecC :: forall c f g l a ts
+         . (KnownSymbol l
+         , FrontExtends l (f a) (R ts)
+         , AllUniqueLabels (Extend l (f a) (R ts)))
+        => Label l 
+        -> f a 
+        -> Rec (R ts)
+        -> Rec (Extend l (f a) (R ts))
+foldRecC lbl@Label fa rts =  undefined 
+
+instance UnfoldRec c f '[] where 
+  unfoldRec _ _ = DNothing 
+
+
+instance ( HasType l (f t) (R row)
+      , c t 
+      , KnownSymbol l 
+      , row ~ '[l ':-> f t]
+      , R '[] ~ (R row R..- l )
+      , FrontExtends l (f t) (R '[]))
+      => UnfoldRec c f '[l ':-> f t]  where
+          unfoldRec proxy myRec = DJust myRec 
+
+instance ( HasType l (f t) (R row)
+      , KnownSymbol l 
+      , row ~ (l ':-> f t ': ts)
+      , c t
+      , R ts ~ (R row R..- l )
+      , FrontExtends l (f t) (R ts)
+      , UnfoldRec c f ts)
+      => UnfoldRec c f (l ':-> f t ': ts) where
+          unfoldRec _ myRec = DJust myRec  
+
+
+data MapBox :: (PathDir -> Type) -> Row PathDir -> Type where
+  EmptyBox :: forall f. MapBox f Empty 
+  MapBox :: Rec (R.Map f row) -> MapBox f row 
+
+class R lts ~ R.Map f (R lks) => Mapped (f :: PathDir -> Type) (lts :: [LT Type]) (lks :: [LT PathDir]) where 
+  transmute ::  Rec (R lts) -> MapBox f (R lks )
+
+instance Mapped f '[] '[] where 
+  transmute = const EmptyBox 
+
+instance Mapped f '[l ':-> f a] '[l ':-> a] where 
+  transmute = MapBox 
+
+instance {-# OVERLAPS #-} (Mapped f lts lks) => Mapped f (l ':-> f a ': lts) (l ':-> a ': lks) where 
+  transmute = MapBox 
 
 
 type AllCompat :: PathDir -> [PathDir] -> Constraint 
@@ -570,6 +745,8 @@ class  AllCompat r ps where
   --allCompat :: forall p. El p ps => Dict 
 
 newtype ConstBox root r = ConstBox (Constant (CompatiBox root) r)
+
+
 data CompatiBox :: PathDir -> Type where 
   MkCompatiBox :: forall root child rootSlot
                 . (Compatible root child, rootSlot ~ RootOf root) 
@@ -661,7 +838,6 @@ instance ( Normalize (Connected old1 (new1 :> 'Leaf_ slot :> 'Up_ slot))
          , RootL old1 ~ RootLR old1 (new1 :> 'Leaf_ slot :> 'Up_ slot)
         ) => Compatible old1 (new1 :> 'Leaf_ slot :> 'Up_ slot) where 
             connectEm old (Up rest) = Up $ connectEm old rest   
-
 
 
 

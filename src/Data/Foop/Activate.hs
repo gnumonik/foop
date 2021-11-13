@@ -15,9 +15,9 @@ import Data.Constraint
 
 -- | Takes a prototype and constructs a root entity, which can be queries 
 --   directly from the rest of the program.
-activate :: forall surface children query c
+activate :: forall surface children query deps 
           . (SlotOrdC (Slot () surface children query))
-         => Model surface children query ('Begin ('Leaf_ (Slot () surface children query)))
+         => Model ('Begin :> 'Leaf_ (Slot () surface children query)) surface children query deps ()
          -> IO (Object (Slot () surface children query))
 activate (Model espec@MkSpec{..}) =  do 
       let storage = mkStorage (Proxy @children)
@@ -28,7 +28,7 @@ activate (Model espec@MkSpec{..}) =  do
       pure $ Object e 
 
 -- | Run a query against a root entity.
-query :: Object '((),su,cs,q)
+query :: Object (Slot () su cs q)
       -> q x 
       -> IO x 
 query (Object e) q = run q e
