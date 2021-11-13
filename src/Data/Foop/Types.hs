@@ -26,6 +26,22 @@ import Control.Lens (Fold, to, Lens')
 import Control.Lens.Getter
 import Data.Type.Equality (type (:~:))
 import Control.Concurrent.STM (TMVar)
+import Data.Functor.Constant
+
+{-- 
+
+Ok so: 
+
+The EntityF/EntityM free monad stuff only carries dependencies. It's slot is implicit 
+(i.e. the Ord i constraint technically needs to be explicitly satisfied at *some point*)
+
+Spec is the non-existentially-hidden configuration data type for an entity. The ord i constrain can still 
+be implicit here. 
+
+EvalState requires the path to be fully instantiated. Need some way of expressing the constraint that 
+all of the dependency paths are satisfied. 
+
+--}
 
 ------------
 -- Types 
@@ -61,35 +77,32 @@ data SlotKey :: Symbol -> Row SlotData -> SlotData -> Type where
 --   `query` is the ADT which represents the component's algebra 
 --
 --   `m` is the inner functor (which for now will always be IO)
-type EntityF :: PathDir -> Row SlotData -> Type -> (Type -> Type) -> (Type -> Type) -> Type -> Type
-data EntityF loc slots state query m a where
-  State   :: (state -> (a,state)) -> EntityF loc slots state query m a
+type EntityF :: Row PathDir -> Row SlotData -> Type -> (Type -> Type) -> (Type -> Type) -> Type -> Type
+data EntityF deps slots state query m a where
+  State   :: (state -> (a,state)) -> EntityF deps slots state query m a
 
-  Lift    :: m a -> EntityF c slots state query m a
+  Lift    :: m a -> EntityF deps slots state query m a
 
-  Observe :: -- CompatibleC (Slot i su slots query) loc path =>  
-             Path path
+  Observe :: Path path
           -> (TraceS path -> a)
-          -> EntityF loc slots state query m a 
+          -> EntityF deps slots state query m a 
 
-  Interact :: -- CompatibleC (Slot i su slots query) loc path => 
-             Path path
+  Interact :: Path path
           -> (TraceE path -> a)
-          -> EntityF loc slots state query m a 
+          -> EntityF deps slots state query m a 
 
   Query    :: Coyoneda query a -> EntityF deps slots state query m a
 
   GetSlot  :: SlotKey l slots slot 
            -> (StorageBox slot -> a) 
-           -> EntityF c slots state query m a
+           -> EntityF deps slots state query m a
 
-  Create   :: (Last new ~ 'Leaf_ (Slot i su cs q)) 
-           => SlotKey l slots (Slot i su cs q)
+  Create   :: SlotKey l slots (Slot i su cs q)
            -> i
            -- probably going to need some kind of normalize constraint 
            -> Model su cs q new
            -> a 
-           -> EntityF loc slots state query m a
+           -> EntityF deps slots state query m a
 
   Delete   :: SlotKey l slots '(i,su,RenderTree cs,q)
            -> i
@@ -176,7 +189,7 @@ data Prototype :: Type -> Row SlotData -> (Type -> Type) -> SlotData -> Type whe
             -> Prototype surface slots query context 
 --}
 
-data Model :: Type -> Row SlotData -> (Type -> Type) -> PathDir -> Type where 
+data Model :: Type -> Row SlotData -> (Type -> Type) -> Row PathDir -> Type where 
   Model :: forall surface slots query state loc 
          . (SlotConstraint slots)
         =>  Spec slots surface state query loc
@@ -210,14 +223,15 @@ newtype Handler query state slots loc
       :: forall r. ((forall x. query x -> EntityM loc slots state query IO x) -> r) -> r}
 
 -- | A `Spec` is the GADT from which an Entity is constructed. 
-type Spec :: Row SlotData -> Type -> Type -> (Type -> Type) -> PathDir -> Type
+type Spec :: Row SlotData -> Type -> Type -> (Type -> Type) -> Row PathDir -> Type
 data Spec slots surface state query c where
   MkSpec ::
-   ( WellBehaved slots) => 
+   ( WellBehaved slots, Ord i) => 
     { initialState   :: state 
     , handleQuery    :: AlgebraQ query :~> EntityM loc slots state query IO 
     , renderer       :: Renderer state surface 
     , slots          :: Proxy slots
+    , dependencies   :: Atlassed (Slot i surface slots query) o
     } -> Spec slots surface state query loc
 
 -- | `AlgebraQ query a` is a wrapper around a type which records a query algebra. 
@@ -225,29 +239,24 @@ data Spec slots surface state query c where
 --   The first type argument (i.e. `query`) has kind `Type -> Type`
 newtype AlgebraQ query a =  Q (Coyoneda query a)
 
--- | Constrained query handler
-type QHandler :: (Type -> Type) -> PathDir -> Row SlotData -> Type ->  Type 
-data QHandler query loc slots state  where 
-  MkQHandler :: forall query state slots loc.
-                (query ~>  EntityM loc slots state query IO)
-             -> QHandler query loc slots state 
+
 
 -- | Evaluation State. Holds the Prototype Spec, the Prototype's State, 
 --   and a Context which can be read from inside the Prototype monad 
-type EvalState ::  PathDir -> Row SlotData -> Type -> Type -> (Type -> Type) -> Type
+type EvalState ::  Row PathDir -> Row SlotData -> Type -> Type -> (Type -> Type) -> Type
 data EvalState  loc slots surface st q where 
   EvalState :: (SlotConstraint slots, Ord i) => {
       _entity      :: Spec slots surface st q loc 
     , _state       :: st
     , _storage     :: Rec (MkStorage slots)
     , _surface     :: surface 
-    , _location    :: Path loc
-    , _environment :: CompatiBox loc -- maybe not
+  --  , _location    :: Path loc
+  --  , _environment :: CompatiBox loc -- maybe not
   } -> EvalState loc slots surface st q 
 
 -- | Existential wrapper over the EvalState record. 
-data ExEvalState :: SlotData ->  PathDir -> Type -> Row SlotData -> (Type -> Type) -> Type where
-  ExEvalState :: ( SlotConstraint slots, Ord i, Last loc ~ 'Leaf_ (Slot i surface slots q)) 
+data ExEvalState :: SlotData ->  Row PathDir -> Type -> Row SlotData -> (Type -> Type) -> Type where
+  ExEvalState :: ( SlotConstraint slots, Ord i) 
               => EvalState  loc slots surface st q
               -> ExEvalState root loc surface slots q
 
@@ -256,7 +265,7 @@ data ExEvalState :: SlotData ->  PathDir -> Type -> Row SlotData -> (Type -> Typ
 --   This mainly serves to make reasoning about the EntityStore comonad less painful, and to 
 --   make type signatures far more readable. 
 data Transformer root loc surface slots query where 
-   Transformer :: (Ord i, Last loc ~ 'Leaf_ (Slot i surface slots query)) => 
+   Transformer :: (Ord i) => 
      (forall x. query x -> IO (x,ExEvalState root loc surface slots query)) -> Transformer root loc surface slots query 
 
 -- | `EntityStore surface query` == `Store (ExEvalState surface query) (Transformer surface query)`
@@ -274,7 +283,7 @@ data Transformer root loc surface slots query where
 --   functionality *combined* with comonad-functionality: We can extract the state. 
 -- 
 --   But mainly this is what it is because Store is my favorite comonad and I jump at any chance to use it :) 
-type EntityStore ::  SlotData -> PathDir -> Type -> Row SlotData -> (Type -> Type) -> Type 
+type EntityStore ::  SlotData -> Row PathDir -> Type -> Row SlotData -> (Type -> Type) -> Type 
 type EntityStore root loc surface children query = Store (ExEvalState root loc surface children query) (Transformer root loc surface children query)
 
 -- | `Entity surface query` is a newtype wrapper over `TVar (EntityStore surface query)`
@@ -418,6 +427,12 @@ testEntailment = mapDict (derive @c1 @c2 @a) Dict
 data (:=) a b = a := b deriving (Show, Eq)
 infixr 8 := 
 
+data Rooted :: SlotData -> PathDir -> Type where 
+  MkRooted :: Path path -> Rooted (RootOf path) path 
+
+data Atlassed :: SlotData -> Row PathDir -> Type where 
+  MkAtlassed :: Rec (R.Map (Rooted slot) paths) -> Atlassed slot paths 
+             
 data Atlas :: SlotData -> [PathDir] -> Type where 
   FirstPath :: forall path. Path path -> Atlas (RootOf path) '[path]
   AddPath :: forall slot path paths 
@@ -534,31 +549,48 @@ type family Connected p1 p2 where
 type family LeafMe (t :: Trail) :: SlotData where 
   LeafMe ('Leaf_ slot) = slot 
 
-type family RootIsF (slot :: SlotData) (path :: PathDir)  :: Constraint where 
-  RootIsF (Slot i su cs q) path = RootOf path ~ (Slot i su cs q) 
+type TestPath = 'Begin :> 'Leaf_ (Slot Int Int Empty Maybe)
+
+data EleC :: PathDir -> k -> [k] -> Type where 
+  El1 :: Compatible root k => EleC root k '[k]
+  El2 :: Compatible root x => EleC k ks -> EleC k (x ': ks)
+
+type El :: k  -> [k] -> Constraint 
+class El k ks where 
+  el :: Ele k ks 
+
+instance El a '[a] where 
+  el = El1
+instance {-# OVERLAPS #-} El a as => El a (x ': as) where 
+  el = El2 el  
 
 
+type AllCompat :: PathDir -> [PathDir] -> Constraint 
+class  AllCompat r ps where 
+  --allCompat :: forall p. El p ps => Dict 
 
-data Paths :: SlotData -> Row PathDir -> Type where 
-  MkPaths :: forall myPaths slot (c :: PathDir -> Constraint)
-           . (c ~ (RootIs slot) 
-           , Forall c myPaths) 
-          => Rec (R.Map Path myPaths) -> Paths myPaths
-
-
+newtype ConstBox root r = ConstBox (Constant (CompatiBox root) r)
 data CompatiBox :: PathDir -> Type where 
   MkCompatiBox :: forall root child rootSlot
                 . (Compatible root child, rootSlot ~ RootOf root) 
-               => Proxy root 
-               -> TMVar (Entity rootSlot)
+               => NormalizedPath root 
+               -> Path child
+           --    -> TMVar (Entity (RootOf root))
                -> CompatiBox child 
-
+{--
 -- need the proxy
 withCompatiBox :: forall child r
                 . CompatiBox child 
-               -> (forall root rootSlot. Compatible root child => Proxy root -> TMVar (Entity rootSlot) -> r)
+               -> (forall root rootSlot. Compatible root child => NormalizedPath root -> TMVar (Entity rootSlot) -> r)
                -> r 
-withCompatiBox (MkCompatiBox proxy tmv) f = f proxy tmv 
+withCompatiBox (MkCompatiBox path tmv) f = f path tmv 
+--}
+class Compatible l1 r1 => Compatible2 l1 r1 where 
+  compatible :: Dict (Compatible l1 r1)
+  compatible = Dict 
+
+instance Compatible l1 r1 => Compatible2 l1 r1
+
 
 type Compatible :: PathDir -> PathDir -> Constraint 
 class ( TipR r1 ~ TipLR l1 r1
