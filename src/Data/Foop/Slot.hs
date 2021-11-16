@@ -194,9 +194,8 @@ deNormalize = \case
   Down' np -> Down (deNormalize np)
 
 
-(||>) :: Path  old -> (Path old -> Path new) -> Path  new 
-a ||> f = f a 
-infixl 1 ||>
+
+
 
 ebranch :: forall i su cs q a l b 
          . NormalizedPath  (a :> 'Branch_ (l ':= b))
@@ -249,7 +248,7 @@ fetch npath leaf = leaf ^. mkGetter npath
 search :: Possibly root path => NormalizedPath path -> RenderLeaf root -> Maybe (TraceS path)
 search npath leaf = leaf ^? mkFold npath 
 
-applyPath :: forall slot p. RootOf p ~ slot => Path p -> Path  p 
+applyPath :: forall slot f p. RootOf p ~ slot => f p -> f  p 
 applyPath path = path 
 
 applyPathN :: forall slot p. RootOf p ~ slot => NormalizedPath p -> NormalizedPath p 
@@ -272,7 +271,39 @@ testRLeaf :: RenderLeaf MySlot
 testRLeaf = undefined 
 
 
-bebop3 =  normalize (applyPath @MySlot doop3)
+
+softNormalize :: Normalize p => Path p -> Path (NormalizeF p)
+softNormalize = deNormalize . normalize 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+testPF =  Here +> Parent +> Child @"anythingHere?" 2
+
+
+-- testApPF = fixPath $ applyPath @MySlot testPF 
+
+bebop3 = softNormalize $ applyPath @MySlot doop3 
+
+
+
+data BoxedPath :: PathDir -> Type where 
+  BoxedPath :: Begins path => Path path -> BoxedPath path 
+
+type Begins :: PathDir -> Constraint 
+type family Begins path where 
+  Begins 'Begin = () 
+  Begins (a :> b) = Begins a 
 
 -- pth = search yoyo testRLeaf 
 
@@ -298,7 +329,9 @@ oyoy Proxy x = Proxy
 
 
 
-hmbam = normalize(applyPath @MySlot doop2)
+
+hmbam = #yo .== (MkRooted $ deNormalize $ normalize (applyPath @MySlot doop2))
+
 
 
 

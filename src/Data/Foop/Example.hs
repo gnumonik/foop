@@ -151,30 +151,6 @@ testCounter = do
 -- GHC can and will infer the type signature, your code might be prettier if you just left it off :)  
 
 
-{--
-See what I mean? :p This mostly amounts to "Ord i and no duplicate labels" as most of the Row Types 
-constructed by the type families cannot be constructed in such a way as to fail to satisfy most of 
-these constraints, but *proving* that to GHC is... not how I wanna spend my weekend
-
-printCount :: (Data.Row.Internal.AllUniqueLabels (MkStorage slots),
-              Data.Row.Internal.AllUniqueLabels slots,
-              Data.Row.Internal.AllUniqueLabels (MkRenderTree slots),
-              Data.Row.Internal.Forall slots Data.Row.Internal.Unconstrained1,
-              Data.Row.Internal.Forall slots SlotOrdC,
-              Data.Row.Internal.Forall
-                (MkStorage slots) Data.Row.Internal.Unconstrained1,
-              Data.Row.Internal.Forall (MkStorage slots) Data.Default.Class.Default,
-              Data.Row.Internal.Forall
-                (MkRenderTree slots) Data.Row.Internal.Unconstrained1,
-              Data.Row.Internal.Forall (MkRenderTree slots) Data.Default.Class.Default,
-              GHC.TypeLits.KnownSymbol lbl, 
-              Ord i,
-              (MkStorage slots Data.Row.Internal..! lbl) ~ Data.Map.Internal.Map i (Data.Foop.Types.Entity r CounterLogic),
-              (MkRenderTree slots Data.Row.Internal..! lbl) ~ Data.Map.Internal.Map i r) 
-          =>
-i -> EntityM slots state q IO () --}
-
-
 printCount i = tell i PrintCount 
 
 getCount i = request i GetCount 
@@ -211,9 +187,7 @@ reifyModel = id
 
 
 
-
-
-counters = reifyModel @Int $ Model $  MkSpec {
+counters =  Model $  MkSpec {
     initialState = ()
   , handleQuery = queryHandler runCounters 
   , renderer = mkSimpleRender show

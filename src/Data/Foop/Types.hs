@@ -429,6 +429,7 @@ testEntailment = mapDict (derive @c1 @c2 @a) Dict
 data (:=) a b = a := b deriving (Show, Eq)
 infixr 8 := 
 
+
 data Rooted :: PathDir -> SlotData -> PathDir -> Type where 
   MkRooted :: forall root path
             . Compatible root path 
@@ -453,7 +454,7 @@ data T a b c
   = Branch_ (b := c)
   | Down_ a 
   | Leaf_ c 
-  | Up_ c 
+  | Up_ a b c 
 
 type PathDir = Crumbs (T (Row SlotData) Symbol SlotData)
 
@@ -472,7 +473,7 @@ type family TraceS crumbs where
 
 type TraceE :: PathDir -> Type 
 type family TraceE crumbs where 
-  TraceE ('Begin :> 'Leaf_ t)         = Entity t 
+  TraceE ('Begin :> 'Leaf_ t)        = Entity t 
   TraceE (old :> 'Leaf_ t)           = Entity t 
   TraceE (old :> 'Branch_ (l ':= t)) = StorageBox t
   TraceE (old :> 'Down_ t)           = StorageTree t  
@@ -480,14 +481,15 @@ type family TraceE crumbs where
 
 type NormalizeF :: PathDir -> PathDir 
 type family NormalizeF path where
+
+  NormalizeF (old1 :>  'Leaf_ (Slot i su cs q) :> 'Down_ cs :> 'Branch_ (l ':= slot) :> 'Leaf_ slot :> 'Up_ cs l slot)
+    = NormalizeF old1 :> 'Leaf_ (Slot i su cs q)
+
   NormalizeF ('Begin :> 'Leaf_ l)
     = ('Begin :> 'Leaf_ l)
 
   NormalizeF (old1 :> 'Down_ cs) 
     = NormalizeF old1 :> 'Down_ cs
-
-  NormalizeF (old1 :> 'Down_ cs :> 'Branch_ (l ':= slot) :> 'Leaf_ slot :> 'Up_ slot) 
-    = NormalizeF  (old1 :>  'Down_ cs) 
 
   NormalizeF (old1 :> old2 :> 'Leaf_ l)    
     = NormalizeF  (old1 :> old2):> 'Leaf_ l 
@@ -495,8 +497,9 @@ type family NormalizeF path where
   NormalizeF (old1 :> old2 :> 'Branch_ b) 
     = NormalizeF (old1 :> old2) :> 'Branch_ b 
 
-class  ( Normalized (NormalizeF p)
-       , RootOf p ~ RootOf (NormalizeF p)) => 
+
+class  ( Normalized (NormalizeF p) , 
+         RootOf p ~ RootOf (NormalizeF p)) => 
   Normalize (p :: PathDir)  where 
   normalize ::  Path p -> NormalizedPath (NormalizeF p)
 
@@ -509,15 +512,18 @@ instance  (Normalize old, RootOf (old :> 'Down_ cs) ~ RootOf (NormalizeF (old :>
     Start -> Down' Start' 
     l@(Leaf i path) -> Down' $ normalize @old l
 
-instance (Normalize (old :> 'Down_ cs)
-        , RootOf (old :> 'Down_ cs) ~ RootOf (old :> 'Down_ cs :> 'Branch_ (l ':= slot))) 
-      => Normalize (old :> 'Down_ cs :> 'Branch_ (l ':= slot) :> 'Leaf_ slot :> 'Up_ slot ) 
+instance (  Normalize (old1 :> 'Leaf_ (Slot i su cs q))
+          , NormalizeF (old1 ':> 'Leaf_ (Slot i su cs q)) ~ (NormalizeF old1 ':> 'Leaf_ (Slot i su cs q))
+          , HasType l slot cs
+          , KnownSymbol l) 
+          =>  Normalize (old1 :> 'Leaf_ (Slot i su cs q) :>  'Down_ cs :> 'Branch_ (l ':= slot) :> 'Leaf_ slot :> 'Up_ cs l slot) 
   where 
-    normalize (Up (Leaf i (Branch  d@(Down d')))) = normalize d 
+    normalize (Up (Leaf _ (Branch (Down x)))) = normalize x
 
-instance ( Normalized (NormalizeF (old1 :> old2 :> 'Leaf_ l))
-         , Normalize (old1 :> old2)
-         , RootOf (old1 :> old2) ~ RootOf (NormalizeF (old1 :> old2 :> 'Leaf_ l))) 
+instance ( Normalize (old1 :> old2)
+         , Normalized (NormalizeF (old1 :> old2 :> 'Leaf_ l))
+         , RootOf (old1 :> old2) ~ RootOf (NormalizeF (old1 :> old2) :> 'Leaf_ l)
+         ) 
         => Normalize (old1 :> old2 :> 'Leaf_ l) where 
   normalize (Leaf i p)  = case p of  
     b@(Branch _) -> Leaf' i (normalize b)
@@ -829,14 +835,14 @@ instance ( Normalize (Connected old1 (new1 :> 'Leaf_ (Slot i su cs q) :> 'Down_ 
         => Compatible old1 (new1 :> 'Leaf_ (Slot i su cs q) :> 'Down_ cs) where 
             connectEm old (Down rest) =  Down $ connectEm  old rest 
 
-instance ( Normalize (Connected old1 (new1 :> 'Leaf_ slot :> 'Up_ slot))
+instance ( Normalize (Connected old1 (new1 :> 'Leaf_ slot :> 'Up_ cs l slot))
 
          , Compatible old1 (new1 :> 'Leaf_ slot)
 
          , Connected old1 (new1 :> 'Leaf_ slot) ~   (Connected old1 new1 :> 'Leaf_ slot)
 
-         , RootL old1 ~ RootLR old1 (new1 :> 'Leaf_ slot :> 'Up_ slot)
-        ) => Compatible old1 (new1 :> 'Leaf_ slot :> 'Up_ slot) where 
+         , RootL old1 ~ RootLR old1 (new1 :> 'Leaf_ slot :> 'Up_ cs l slot)
+        ) => Compatible old1 (new1 :> 'Leaf_ slot :> 'Up_ cs l slot) where 
             connectEm old (Up rest) = Up $ connectEm old rest   
 
 
@@ -871,9 +877,151 @@ data Path ::  PathDir -> Type where
         . Path (old :> 'Leaf_ (Slot i su cs q)) 
        -> Path (old :> 'Leaf_ (Slot i su cs q) :> 'Down_ cs)
 
-  Up  :: forall  slot root old1 slots 
-      .  Path  (old1 :> 'Leaf_ slot)
-      -> Path  (old1 :> 'Leaf_ slot :> Up_ slot)
+  Up  :: forall  parent l slot old1 i su cs q 
+      .  (HasType l (Slot i su cs q) parent, KnownSymbol l)
+      =>  Path  (old1 :> 'Leaf_ (Slot i su cs q))
+      -> Path  (old1 :> 'Leaf_ (Slot i su cs q) :> Up_ parent l (Slot i su cs q))
+
+data PathFinder' :: PathDir -> Type where 
+  Here' :: forall i su cs q l 
+        . Ord i 
+       =>  PathFinder' ('Begin :> 'Leaf_ (Slot i su cs q))
+
+  -- downward leaf to leaf 
+  Child' :: forall l q i su i' su' cs' q' cs root old
+         . (ChildC l cs (Slot i' su' cs' q'), Ord i', Forall cs' SlotOrdC) 
+        => i' 
+        -> PathFinder' (old :> 'Leaf_ (Slot i su cs q)) 
+        -> PathFinder' (  old 
+                      :> 'Leaf_ (Slot i su cs q)
+                      :> 'Down_ cs
+                      :> 'Branch_ (l ':= Slot i' su' cs' q' )
+                      :> 'Leaf_ (Slot i' su' cs' q'))
+{--
+  Parent' :: forall l i su cs q i' su' cs' q'  old 
+          . HasType l (Slot i' su' cs' q') cs  
+         => PathFinder' (old  :> 'Leaf_ (Slot i su cs q)) 
+         -> PathFinder' ( old 
+                      :> 'Leaf_ (Slot i su cs q) 
+                      :> 'Down_ cs 
+                      :> 'Branch_ (l ':= Slot i' su' cs' q')
+                      :> 'Leaf_ (Slot i' su' cs' q'))
+         -> PathFinder' (  old :> 'Leaf_ (Slot i su cs q) )
+--}
+
+
+data PathFinder :: PathDir -> Type where 
+  Here :: forall i su cs q 
+        . Ord i 
+       => PathFinder ('Begin :> 'Leaf_ (Slot i su cs q))
+
+  Child :: forall l q i su i' su' cs' q' cs root old
+         . (ChildC l cs (Slot i' su' cs' q'), Ord i', Forall cs' SlotOrdC) 
+        => i' 
+        -> PathFinder (old :> 'Leaf_ (Slot i su cs q)) 
+        -> PathFinder (  old 
+                      :> 'Leaf_ (Slot i su cs q)
+                      :> 'Down_ cs
+                      :> 'Branch_ (l ':= Slot i' su' cs' q')
+                      :> 'Leaf_ (Slot i' su' cs' q'))
+
+  Parent :: forall slot old l cs 
+          . PathFinder (old :> 'Leaf_ slot)
+         -> PathFinder (old :> 'Leaf_ slot :> Up_ cs l slot)
+
+
+type FixPath :: PathDir -> PathDir
+type family FixPath path where 
+  FixPath 'Begin = 'Begin --stupid 
+  
+  FixPath  ('Begin :> 'Leaf_ (Slot i su cs q)) = ('Begin :> 'Leaf_ (Slot i su cs q))
+
+  FixPath (      old 
+             :> 'Leaf_ (Slot i su cs q)
+             :> 'Down_ cs
+             :> 'Branch_ (l ':= Slot i' su' cs' q' )
+             :> 'Leaf_ (Slot i' su' cs' q')) = FixPath old 
+                                            :> 'Leaf_ (Slot i su cs q)
+                                            :> 'Down_ cs
+                                            :> 'Branch_ (l ':= Slot i' su' cs' q' )
+                                            :> 'Leaf_ (Slot i' su' cs' q')
+
+  FixPath (   old 
+          :> 'Leaf_ (Slot i su cs q) 
+          :> 'Down_ cs 
+          :> 'Branch_ (l ':= Slot i' su' cs' q')
+          :> 'Leaf_ (Slot i' su' cs' q')
+          :> 'Up_ _cs _l (Slot i' su' cs' q')) = FixPath old :> 'Leaf_ (Slot i su cs q)
+
+class Fixed path ~ FixPath path => FixPathC path where 
+  type Fixed path :: PathDir 
+  type Fixed path = FixPath path 
+
+  fixPath :: PathFinder path -> PathFinder' (FixPath path )
+
+instance FixPathC ('Begin :> 'Leaf_ (Slot i su cs q)) where
+  fixPath Here = Here' 
+
+instance (FixPath (old ':> 'Leaf_ (Slot i su cs q))
+         ~ (FixPath old ':> 'Leaf_ (Slot i su cs q))
+         , FixPathC (old :> 'Leaf_ (Slot i su cs q)))
+     => FixPathC ( old 
+                 :> 'Leaf_ (Slot i su cs q)
+                 :> 'Down_ cs
+                 :> 'Branch_ (l ':= Slot i' su' cs' q' )
+                 :> 'Leaf_ (Slot i' su' cs' q')) where 
+                   fixPath (Child i rest) = Child' i (fixPath rest)
+
+
+instance ( FixPathC (old :> 'Leaf_ (Slot i su cs q))
+         , FixPath (old ':> 'Leaf_ (Slot i su cs q)) ~ (FixPath old ':> 'Leaf_ (Slot i su cs q))
+                 ) => FixPathC ( old
+                              :> 'Leaf_ (Slot i su cs q)
+                              :> 'Down_ cs
+                              :> 'Branch_ (l ':= Slot i' su' cs' q' )
+                              :> 'Leaf_ (Slot i' su' cs' q')
+                              :> 'Up_ _cs _l (Slot  i' su' cs' q')
+                 ) where 
+                      fixPath (Parent rest) = case rest of 
+                        Child i xs -> fixPath xs
+
+
+type OKPath :: PathDir -> Constraint 
+type family OKPath path where 
+  OKPath  ('Begin :> 'Leaf_ (Slot i su cs q)) = ()
+
+  OKPath (      old 
+             :> 'Leaf_ (Slot i su cs q)
+             :> 'Down_ cs
+             :> 'Branch_ (l ':= Slot i' su' cs' q' )
+             :> 'Leaf_ (Slot i' su' cs' q')) = OKPath old 
+
+
+  OKPath (   old 
+          :> 'Leaf_ (Slot i su cs q) 
+          :> 'Down_ cs 
+          :> 'Branch_ (l ':= slot)
+          :> 'Leaf_ slot 
+
+          :> 'Up_ cs l slot) = OKPath old 
+
+(||>) :: Path  old -> (Path old -> Path new) -> Path  new 
+a ||> f = f a 
+infixl 1 ||>
+(/>) :: NormalizedPath  old -> (NormalizedPath old -> NormalizedPath new) -> NormalizedPath  new 
+a /> f = f a 
+infixl 1 />
+
+(+>) :: PathFinder old -> (PathFinder old -> PathFinder new) -> PathFinder new 
+a +> b = b a 
+infixl 1 +>
+normalizePF :: forall path. PathFinder' path -> NormalizedPath path 
+normalizePF = \case 
+  Here' -> Start' 
+
+  Child' i rest -> normalizePF rest /> Down' /> Branch' SlotKey /> Leaf' i
+
+  -- Parent' rest -> normalizePF rest 
 
 class (HasType l t rs, KnownSymbol l)   => HasType_ t rs l
 instance (HasType l t rs,KnownSymbol l) => HasType_ t rs l
@@ -881,16 +1029,21 @@ instance (HasType l t rs,KnownSymbol l) => HasType_ t rs l
 type HasTypeQ slot cs = DC.ForallV (HasType_ slot cs)
 
 data NormalizedPath :: PathDir -> Type where 
-  Start' :: forall l i q su cs. (Ord i) =>  NormalizedPath ('Begin :> 'Leaf_ (Slot i su cs q))
+  Start' :: forall l i q su cs
+          . ( Ord i
+            , Normalized ('Begin :> 'Leaf_ (Slot i su cs q))) 
+           =>  NormalizedPath ('Begin :> 'Leaf_ (Slot i su cs q))
 
   Branch' :: forall l i q su cs slots old root 
-         . (KnownSymbol l, HasType l (Slot i su cs q) slots, Ord i) 
+         . (KnownSymbol l
+           , HasType l (Slot i su cs q) slots
+           , Ord i) 
         => SlotKey l slots (Slot i su cs q) 
         -> NormalizedPath  (old :> 'Down_ slots) 
         -> NormalizedPath  ((old :> 'Down_ slots) :> 'Branch_ (l ':= Slot i su cs q))
 
   Leaf' :: forall q i su cs l slots old root 
-        . Ord i 
+        . (Ord i)
        => i
        -> NormalizedPath  (old :> 'Branch_ (l ':= Slot i su cs q))
        -> NormalizedPath  ((old :> 'Branch_ (l ':= Slot i su cs q)) :> 'Leaf_ (Slot i su cs q))
@@ -902,53 +1055,20 @@ data NormalizedPath :: PathDir -> Type where
 
 
 {-- 
-extendify :: ( Connectable old ('Leaf_ (Slot i su cs q)) ('Begin :> 'Leaf_ (Slot i su cs q)) 
-             , Normalize (Connected (old :> 'Leaf_ (Slot i su cs q)) ('Begin :> 'Leaf_ (Slot i su cs q)))
-             , Normalize (Connected 
-                          (Connected (old :> 'Leaf_ (Slot i su cs q)) ('Begin :> 'Leaf_ (Slot i su cs q)))
-                          (path :> target)
-                          )
-             )
-          => Path root (old :> 'Leaf_ (Slot i su cs q)) 
-          -> Path (Slot i su cs q) (path :> target)
-          -> Targets root target 
-extendify root new = case connect' root new of 
-  
-  • Could not deduce: Connected
-                      old1 (new1 ':> 'Leaf_ (Slot i su cs q))
-                    ~ (old0 ':> 'Leaf_ (Slot i0 su0 cs q0))
-  from the context: (Normalize
-                       (Connected
-                          old1 ((new1 ':> 'Leaf_ (Slot i su cs q)) ':> 'Down_ cs)),
-                     Compatible old1 (new1 ':> 'Leaf_ (Slot i su cs q)),
-                     Last (Connected old1 (new1 ':> 'Leaf_ (Slot i su cs q)))
-                     ~ 'Leaf_ (Slot i su cs q),
-                     Connected old1 ((new1 ':> 'Leaf_ (Slot i su cs q)) ':> 'Down_ cs)
-                     ~ (Connected old1 (new1 ':> 'Leaf_ (Slot i su cs q))
-                        ':> 'Down_ cs))
+• Could not deduce: LeafMe (First (NormalizeF old1 ':> old2))
+                    ~ LeafMe (First (NormalizeF (old1 ':> old2)))
+    arising from the superclasses of an instance declaration
+  from the context: (Normalize old1, Normalize (old1 ':> old2),
+                     Normalized
+                       ((NormalizeF old1 ':> old2) ':> 'Leaf_ (Slot i su cs q)))
     bound by the instance declaration
-    at /home/gsh/code/haskell/foop/src/Data/Foop/Types.hs:(573,10)-(581,73)
-  Expected type: Path
-                   (Connected old1 ((new1 ':> 'Leaf_ (Slot i su cs q)) ':> 'Down_ cs))
-    Actual type: Path
-                   ((old0 ':> 'Leaf_ (Slot i0 su0 cs q0)) ':> 'Down_ cs)
-  The type variables ‘old0’, ‘i0’, ‘su0’, ‘q0’ are ambiguous
-• In the expression:
-    Down $ connectEm @old1 @(new1 :> 'Leaf_ (Slot i su cs q)) old rest
-  In an equation for ‘connectEm’:
-      connectEm old (Down rest)
-        = Down
-            $ connectEm @old1 @(new1 :> 'Leaf_ (Slot i su cs q)) old rest
-  In the instance declaration for
-    ‘Compatible
-       old1 ((new1 ':> 'Leaf_ (Slot i su cs q)) ':> 'Down_ cs)’
-• Relevant bindings include
-    old :: Path old1
-      (bound at /home/gsh/code/haskell/foop/src/Data/Foop/Types.hs:582:23)
-    connectEm :: Path old1
-                 -> Path ((new1 ':> 'Leaf_ (Slot i su cs q)) ':> 'Down_ cs)
-                 -> Path
-                      (Connected old1 ((new1 ':> 'Leaf_ (Slot i su cs q)) ':> 'Down_ cs))
-      (bound at /home/gsh/code/haskell/foop/src/Data/Foop/Types.hs:582:13)
+    at /home/gsh/code/haskell/foop/src/Data/Foop/Types.hs:(516,12)-(519,146)
+  NB: ‘LeafMe’ is a non-injective type family
+• In the instance declaration for
+    ‘Normalize
+       ((((((old1 ':> old2) ':> 'Leaf_ (Slot i su cs q)) ':> 'Down_ cs)
+          ':> 'Branch_ (l ':= slot))
+         ':> 'Leaf_ slot)
+        ':> 'Up_ (Slot i su cs q))’
   --}
 
