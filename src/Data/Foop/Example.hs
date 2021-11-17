@@ -52,7 +52,6 @@ returning x m = m >> pure x
 
 
 
-
 type TOP :: forall k. k -> Constraint 
 class TOP c 
 instance TOP c 
@@ -60,30 +59,18 @@ instance TOP c
 
 defaultSpec = MkSpec () (queryHandler $ \(Identity x) -> pure x) (mkSimpleRender (const ())) emptySlots
 
+noDeps = MkPaths R.empty 
 
 
 
 
-
-noDeps :: (Map (Rooted root slot) paths ~ 'R '[]) => Atlassed root slot paths
-noDeps = MkAtlassed R.empty 
-
-counter :: forall root i. Ord i => Model root String Empty CounterLogic Empty i
 counter =  Model $ MkSpec {
     initialState = 0 :: Int
   , handleQuery  = queryHandler runCounterLogic 
   , renderer     = mkSimpleRender show  -- this is a function from the component's state to its surface
   , slots        = emptySlots 
-  , dependencies = noDeps 
+  , dependencies = NoDeps
   }
-
--- runCounterLogic :: CounterLogic ~> EntityM Empty Int CounterLogic IO
-
-
-
-
-
-
 
 runCounterLogic =  \case 
   GetCount f -> f <$> get 
@@ -176,23 +163,46 @@ type CountersSlots = "counterA" .== Slot String String Empty CounterLogic
 
 --mkCounters :: Prototype String CountersLogic
 
-reifyModel :: forall i root su cs q deps 
-            . Model root su cs q deps i 
-           -> Model root su cs q deps i 
-reifyModel = id 
 
-counters =  Model $  MkSpec {
+
+
+
+mkIndexed :: forall i root deps state surface slots query
+           . Spec root deps state (Slot i surface slots query)
+          -> Spec root deps state (Slot i surface slots query)
+mkIndexed = id 
+
+mkRoot :: Spec ('Begin :> 'Leaf_ (Slot i surface slots query)) deps state (Slot i surface slots query)
+       -> Spec ('Begin :> 'Leaf_ (Slot i surface slots query)) deps state (Slot i surface slots query)
+mkRoot = id 
+
+instSlots :: forall slots i root deps state surface query
+       . Spec root deps state (Slot i surface slots query)
+      -> Spec root deps state (Slot i surface slots query)
+instSlots = id 
+
+
+testPath :: (Forall paths (Rooted slot), Ord i,
+ Map (PathFinder 'Begin) paths
+ ~ 'R
+     '[ "here"
+        ':-> PathFinder start (start ':> 'Leaf_ (Slot i su cs q))]) =>
+ MkPaths slot paths
+testPath = MkPaths (#here .== Here)
+
+
+counters =  MkSpec {
     initialState = ()
   , handleQuery = queryHandler runCounters 
   , renderer = mkSimpleRender show
   , slots = Proxy @CountersSlots
-  , dependencies = MkAtlassed (#here .== MkRooted Start) 
+  , dependencies = testPath
   }
  where
   -- runCounters ::  CountersLogic ~> EntityM CountersSlots () CountersLogic IO 
    runCounters = \case 
     NewCounterA n x -> do 
-  --    create @"counterA" n counter
+      create @"counterA" n counter
       pure x  
 
     NewCounterB n x -> do 
@@ -204,6 +214,7 @@ counters =  Model $  MkSpec {
       pure x 
 
     TellCounter k t x  -> do  
+      hm <- observe_ @"here" id
       either (\i -> tell @"counterA" i t) (\i -> tell @"counterB" i t) k 
       pure x  
 

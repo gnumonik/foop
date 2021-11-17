@@ -186,13 +186,14 @@ test = nodes bebop
 
 test1 x = x ^? (branch @"slot1" . leaf 2 . surface)
 
+{--
 deNormalize :: NormalizedPath path -> Path path 
 deNormalize = \case 
   Start' -> Start 
   Branch' SlotKey np -> Branch  (deNormalize np) 
   Leaf' i np -> Leaf i (deNormalize np)
   Down' np -> Down (deNormalize np)
-
+--}
 
 
 
@@ -203,50 +204,10 @@ ebranch :: forall i su cs q a l b
         -> STM (Maybe (Rec (l .== StorageBox b)))
 ebranch = undefined 
 
-type PathErr  path = Path  path
 
-doop2 =   Start 
-      ||> Down 
-      ||> Branch @"rootSlotA" 
 
-type family Target (p :: PathDir) :: T (Row SlotData) Symbol SlotData where 
-  Target (a :> b)   = b 
 
-class RootOf p ~ slot => Certainly (slot :: SlotData) (p :: PathDir) where 
-  mkGetter :: NormalizedPath p -> Getter (RenderLeaf slot) (TraceS p)
 
-instance Certainly (Slot i su cs q) ('Begin :> 'Leaf_ (Slot i su cs q)) where 
-  mkGetter Start' = to id
-
-instance Certainly root (old :> 'Down_ slots) => Certainly root ((old :> 'Down_ slots) :> 'Branch_ (l ':= Slot i su cs q)) where 
-  mkGetter (Branch' key old) = mkGetter old . to (lookupSurface key)
-
-instance  Certainly (Slot i su cs q) ('Begin :> 'Leaf_ (Slot i su cs q) :> 'Down_ cs) where 
-  mkGetter (Down' Start') = to $ \(MkRenderLeaf su cs) -> cs
-
-class RootOf p ~ slot => Possibly (slot :: SlotData) (p :: PathDir) where 
-  mkFold :: NormalizedPath  p -> Fold (RenderLeaf slot) (TraceS p)
-{--
-instance Possibly (Slot i su cs q) ('Begin :> 'Leaf_ (Slot i su cs q)) where 
-  mkFold Start' = to id
---}
-instance Possibly root (old :> 'Down_ slots) => Possibly root ((old :> 'Down_ slots) :> 'Branch_ (l ':= Slot i su cs q)) where 
-  mkFold (Branch' key old) = mkFold old . to (lookupSurface key)
-
-instance  Possibly (Slot i su cs q) ('Begin :> 'Leaf_ (Slot i su cs q) :> 'Down_ cs) where 
-  mkFold (Down' Start') = to $ \(MkRenderLeaf su cs) -> cs
-
-instance Possibly root (old :> 'Branch_ (l ':= Slot i su cs q)) => Possibly root (old :> 'Branch_ (l ':= Slot i su cs q) :> 'Leaf_ (Slot i su cs q)) where 
-  mkFold (Leaf' i old) = mkFold old . leaf i
-
-instance Possibly root (old1 :> 'Leaf_ (Slot i su cs q)) => Possibly root (old1 :> 'Leaf_ (Slot i su cs q) :> 'Down_ cs) where 
-  mkFold (Down' old) = mkFold old . to (\(MkRenderLeaf su cs) -> cs)
-
-fetch :: Certainly root path => NormalizedPath path -> RenderLeaf root -> TraceS path 
-fetch npath leaf = leaf ^. mkGetter npath 
-
-search :: Possibly root path => NormalizedPath path -> RenderLeaf root -> Maybe (TraceS path)
-search npath leaf = leaf ^? mkFold npath 
 
 applyPath :: forall slot f p. RootOf p ~ slot => f p -> f  p 
 applyPath path = path 
@@ -254,59 +215,27 @@ applyPath path = path
 applyPathN :: forall slot p. RootOf p ~ slot => NormalizedPath p -> NormalizedPath p 
 applyPathN path = path 
 
-applyAtlas :: forall slot paths. Atlas slot paths -> Atlas slot paths 
+
+
+applyAtlas :: forall slot paths parent. Forall paths (Rooted slot) => Atlas parent paths -> Atlas parent paths 
 applyAtlas = id 
 
-hmbm = applyAtlas @MySlot debop 
 
-debop =  FirstPath (Start ||> Down) 
 
-doop3 = Start ||> Down ||> Branch @"rootSlotA" ||> Leaf True ||> Up
-
-doop4 = Start ||> Up
 
 testRLeaf :: RenderLeaf MySlot 
 testRLeaf = undefined 
 
 
 
-softNormalize :: Normalize p => Path p -> Path (NormalizeF p)
-softNormalize = deNormalize . normalize 
-
-
-
-
-
-
-
-
-
-
 reifyPF :: forall start root path. root ~ RootOf path => PathFinder start path -> PathFinder start path 
 reifyPF = id 
 
-
-
-
-
-
-      
-testPF =  fixPath $  reifyPF @'Begin @MySlot $ Here +> Child @"rootSlotA" True +> Parent 
+testPF = fixPath $ reifyPF @'Begin @MySlot $ Here +> Child @"rootSlotA" True +> Parent 
 
 
 -- testApPF = fixPath $ applyPath @MySlot testPF 
 
-bebop3 = softNormalize $ applyPath @MySlot doop3 
-
-
-
-data BoxedPath :: PathDir -> Type where 
-  BoxedPath :: Begins path => Path path -> BoxedPath path 
-
-type Begins :: PathDir -> Constraint 
-type family Begins path where 
-  Begins 'Begin = () 
-  Begins (a :> b) = Begins a 
 
 -- pth = search yoyo testRLeaf 
 
@@ -314,31 +243,6 @@ bodoop :: forall t slot. t ~ Maybe (RenderLeaf slot) => Maybe (RenderLeaf slot) 
 bodoop _ = Proxy 
 
 
-type ReduceF :: forall k -> Bool
-type family ReduceF k where 
-  ReduceF Void = False 
-  ReduceF k    = True 
-
-class ReduceF k ~ True => Reduced k where 
-  dummyMethod1 :: Proxy k 
-  dummyMethod1 = Proxy 
-
-instance ReduceF k ~ True => Reduced k
-
-
-oyoy :: forall a t t'. (Normalized a, t ~ a, t' ~ t, KindOf t ~ KindOf a) => Proxy (Path t') -> Path a -> Proxy t 
-oyoy Proxy x = Proxy
-
-
-
-
-
-hmbam = #yo .== (MkRooted $ deNormalize $ normalize (applyPath @MySlot doop2))
-
-
-
-
-yoyo  = applyPath @MySlot $ connectEm  (Start ||> Down ||> Branch @"rootSlotB"||> Leaf 'a' )  (Start ||> Up)
 
 
 type MySlot = Slot Bool Bool Row1 Maybe 

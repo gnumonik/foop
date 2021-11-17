@@ -62,9 +62,9 @@ withExEval (ExEvalState e) f = f e
 new_ :: forall index surface slots query context deps root 
         . ( Ord index
           , Forall slots SlotOrdC
-          ) => Path root 
+          ) => PathFinder' root 
             -> TMVar (Entity (RootOf root))
-            -> Model root surface slots query deps index 
+            -> Model root deps (Slot index surface slots query) 
             -> IO (Entity (Slot index surface slots query))
 new_ path tmv (Model spec@(MkSpec iState qHandler renderR slots deps)) = do 
   let eState = initE path tmv spec 
@@ -82,7 +82,7 @@ new_' :: forall root surface slots query i state deps
         . ( Forall slots SlotOrdC
           , SlotConstraint slots
           )
-       => Spec ('Begin ':> 'Leaf_ (Slot () surface slots query)) slots surface state query deps i  
+       => Spec ('Begin ':> 'Leaf_ (Slot () surface slots query)) deps state (Slot i surface slots query)  
        -> Rec (MkStorage slots) 
        -> surface 
        -> RenderTree slots 
@@ -94,7 +94,7 @@ new_' spec@MkSpec{..} storage surface tree cxt  =  do
                            ,_state       = initialState 
                            ,_storage     = storage 
                            ,_surface     = surface 
-                           ,_location    = Start
+                           ,_location    = Here'
                            ,_environment = env 
                             }
     eStore <- newTVarIO $  mkEntity_ @() evalSt
@@ -105,9 +105,9 @@ new_' spec@MkSpec{..} storage surface tree cxt  =  do
 -- | Initializes an EvalState given a Spec 
 initE :: forall slots surface st q deps  root i
        . ( SlotConstraint slots)
-      => Path root 
+      => PathFinder' root 
       -> TMVar (Entity (RootOf root))
-      -> Spec root slots surface st q deps i
+      -> Spec root deps st (Slot i surface slots q)
       -> EvalState root deps slots surface st q 
 initE path tmv espec@MkSpec{..}
   = EvalState {_entity      = espec
@@ -284,7 +284,7 @@ evalF eState@EvalState{..} = \case
       pure $ withDict d (leaf ^. g)
 --}
   Query q -> case _entity of 
-    MkSpec iState hQuery renderR proxy deps -> 
+    MkSpec iState hQuery renderR proxy deps  -> 
       case apNT hQuery (Q q) of
         EntityM ef -> foldF (evalF (EvalState {..})) ef
 
@@ -331,15 +331,19 @@ delete i = EntityM . liftF $ Delete (SlotKey :: SlotKey label slots '(i,su,Rende
 
 
 
-create i p = EntityM . liftF $ Create (SlotKey )   i p ()
+create :: forall l i cs m su q deps slot state query slots r ds. (Functor m, Ord i, Forall slots SlotOrdC, Forall cs SlotOrdC,
+ KnownSymbol l, HasType l (Slot i su cs q) slots) =>
+  i
+  -> Model r ds (Slot i su cs q)
+  -> EntityM deps slots state query m ()
+create i p = EntityM . liftF $ Create (SlotKey @l )   i p ()
 
-observe_ :: forall i su slots query path state a loc 
-          . RootOf path ~ Slot i su slots query 
-          =>  Path  path
-          -> (TraceS path -> a)
-          -> EntityM loc slots state query IO a 
+observe_ :: forall l m deps a slots state query. (Functor m, KnownSymbol l) 
+         => Label l
+         -> (TraceS (deps .! l) -> a) 
+         -> EntityM deps slots state query m a
 observe_ path f = EntityM . liftF $ Observe path f 
-
+--}
 {--
 open' :: forall label slots i su cs q state query c r 
       . (ChildC label slots '(i,su,RenderTree cs,q))
