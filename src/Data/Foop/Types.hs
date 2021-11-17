@@ -774,7 +774,6 @@ class Compatible l1 r1 => Compatible2 l1 r1 where
 
 instance Compatible l1 r1 => Compatible2 l1 r1
 
-
 type Compatible :: PathDir -> PathDir -> Constraint 
 class ( TipR r1 ~ TipLR l1 r1
       , Connection l1 r1 ~ Connected l1 r1 
@@ -864,8 +863,8 @@ data Path ::  PathDir -> Type where
 
   Branch :: forall l i q su slots cs root old 
           . (ChildC l slots (Slot i su cs q), Ord i, Forall slots SlotOrdC) 
-        => Path (old :> 'Down_ slots) 
-        -> Path ((old :> 'Down_ slots) :> 'Branch_ (l ':= Slot i su cs q))
+         => Path (old :> 'Down_ slots) 
+         -> Path ((old :> 'Down_ slots) :> 'Branch_ (l ':= Slot i su cs q))
 
   Leaf :: forall l q i su cs  slots old root 
         . Ord i 
@@ -910,25 +909,49 @@ data PathFinder' :: PathDir -> Type where
 --}
 
 
-data PathFinder :: PathDir -> Type where 
-  Here :: forall i su cs q 
-        . Ord i 
-       => PathFinder ('Begin :> 'Leaf_ (Slot i su cs q))
+extendPath :: forall  old i su cs q start l
+            .  PathFinder start (old :> 'Leaf_ (Slot i su cs q))
+            -> PathFinder 'Begin ('Begin :> 'Leaf_ (Slot i su cs q))
+            -> PathFinder start (old :> 'Leaf_ (Slot i su cs q))
+extendPath (Child i old) Here = Child i old 
+extendPath Here Here = Here 
 
-  Child :: forall l q i su i' su' cs' q' cs root old
+type family JoinPath (p1 :: PathDir) (p2 :: PathDir) :: PathDir where 
+  JoinPath (old :> 'Leaf_ (Slot i su cs q)) ('Begin :> 'Leaf_ (Slot i su cs q)) = (old :> 'Leaf_ (Slot i su cs q)) 
+  JoinPath a (b :> c) = JoinPath a b :> c
+
+class Last (JoinPath p1 p2) ~ Last p2 =>  JoinPathC (p1 :: PathDir) (p2 :: PathDir) where 
+  type JoinedPath p1 p2 :: PathDir 
+  type JoinedPath p1 p2 = JoinPath p1 p2 
+
+  joinPath :: forall start
+            . PathFinder start p1 
+           -> PathFinder 'Begin p2 
+           -> PathFinder start (JoinPath p1 p2)
+
+instance JoinPathC (old :> 'Leaf_ (Slot i su cs q)) ('Begin :> 'Leaf_ (Slot i su cs q)) where 
+  joinPath old Here = case old of 
+    Here -> Here 
+    Child i' pf -> Child i' pf 
+
+data PathFinder :: PathDir -> PathDir -> Type where 
+  Here :: forall i su cs q start 
+        . Ord i 
+       => PathFinder start (start :> 'Leaf_ (Slot i su cs q))
+
+  Child :: forall l q i su i' su' cs' q' cs root old start 
          . (ChildC l cs (Slot i' su' cs' q'), Ord i', Forall cs' SlotOrdC) 
         => i' 
-        -> PathFinder (old :> 'Leaf_ (Slot i su cs q)) 
-        -> PathFinder (  old 
+        -> PathFinder start (old :> 'Leaf_ (Slot i su cs q)) 
+        -> PathFinder start ( old 
                       :> 'Leaf_ (Slot i su cs q)
                       :> 'Down_ cs
                       :> 'Branch_ (l ':= Slot i' su' cs' q')
                       :> 'Leaf_ (Slot i' su' cs' q'))
 
-  Parent :: forall slot old l cs 
-          . PathFinder (old :> 'Leaf_ slot)
-         -> PathFinder (old :> 'Leaf_ slot :> Up_ cs l slot)
-
+  Parent :: forall slot old l cs start 
+          . PathFinder start (old :> 'Leaf_ slot)
+         -> PathFinder start (old :> 'Leaf_ slot :> Up_ cs l slot)
 
 type FixPath :: PathDir -> PathDir
 type family FixPath path where 
@@ -957,7 +980,7 @@ class Fixed path ~ FixPath path => FixPathC path where
   type Fixed path :: PathDir 
   type Fixed path = FixPath path 
 
-  fixPath :: PathFinder path -> PathFinder' (FixPath path )
+  fixPath :: PathFinder 'Begin path -> PathFinder' (FixPath path )
 
 instance FixPathC ('Begin :> 'Leaf_ (Slot i su cs q)) where
   fixPath Here = Here' 
@@ -1008,20 +1031,20 @@ type family OKPath path where
 (||>) :: Path  old -> (Path old -> Path new) -> Path  new 
 a ||> f = f a 
 infixl 1 ||>
+
 (/>) :: NormalizedPath  old -> (NormalizedPath old -> NormalizedPath new) -> NormalizedPath  new 
 a /> f = f a 
 infixl 1 />
 
-(+>) :: PathFinder old -> (PathFinder old -> PathFinder new) -> PathFinder new 
+(+>) :: PathFinder start old -> (PathFinder start old -> PathFinder start new) -> PathFinder start new 
 a +> b = b a 
 infixl 1 +>
+
 normalizePF :: forall path. PathFinder' path -> NormalizedPath path 
 normalizePF = \case 
   Here' -> Start' 
 
   Child' i rest -> normalizePF rest /> Down' /> Branch' SlotKey /> Leaf' i
-
-  -- Parent' rest -> normalizePF rest 
 
 class (HasType l t rs, KnownSymbol l)   => HasType_ t rs l
 instance (HasType l t rs,KnownSymbol l) => HasType_ t rs l
@@ -1035,7 +1058,7 @@ data NormalizedPath :: PathDir -> Type where
            =>  NormalizedPath ('Begin :> 'Leaf_ (Slot i su cs q))
 
   Branch' :: forall l i q su cs slots old root 
-         . (KnownSymbol l
+         . ( KnownSymbol l
            , HasType l (Slot i su cs q) slots
            , Ord i) 
         => SlotKey l slots (Slot i su cs q) 
@@ -1050,7 +1073,7 @@ data NormalizedPath :: PathDir -> Type where
 
   Down' :: forall i su cs q old root 
          . NormalizedPath (old :> 'Leaf_ (Slot i su cs q))
-         -> NormalizedPath (old :> 'Leaf_ (Slot i su cs q) :> 'Down_ cs)
+        -> NormalizedPath (old :> 'Leaf_ (Slot i su cs q) :> 'Down_ cs)
 
 
 

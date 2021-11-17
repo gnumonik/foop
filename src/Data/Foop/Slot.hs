@@ -257,8 +257,6 @@ applyPathN path = path
 applyAtlas :: forall slot paths. Atlas slot paths -> Atlas slot paths 
 applyAtlas = id 
 
-
-
 hmbm = applyAtlas @MySlot debop 
 
 debop =  FirstPath (Start ||> Down) 
@@ -284,11 +282,16 @@ softNormalize = deNormalize . normalize
 
 
 
+reifyPF :: forall start root path. root ~ RootOf path => PathFinder start path -> PathFinder start path 
+reifyPF = id 
 
 
 
 
-testPF =  Here +> Parent +> Child @"anythingHere?" 2
+
+
+      
+testPF =  fixPath $  reifyPF @'Begin @MySlot $ Here +> Child @"rootSlotA" True +> Parent 
 
 
 -- testApPF = fixPath $ applyPath @MySlot testPF 

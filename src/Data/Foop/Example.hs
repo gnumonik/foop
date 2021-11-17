@@ -176,16 +176,10 @@ type CountersSlots = "counterA" .== Slot String String Empty CounterLogic
 
 --mkCounters :: Prototype String CountersLogic
 
-
-
-
 reifyModel :: forall i root su cs q deps 
             . Model root su cs q deps i 
            -> Model root su cs q deps i 
 reifyModel = id 
-
-
-
 
 counters =  Model $  MkSpec {
     initialState = ()
