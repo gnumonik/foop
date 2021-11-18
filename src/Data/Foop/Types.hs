@@ -562,6 +562,14 @@ data PathFinder' :: PathDir -> Type where
                       :> 'Down_ cs
                       :> 'Branch_ (l ':= Slot i' su' cs' q' )
                       :> 'Leaf_ (Slot i' su' cs' q'))
+childLbl :: forall old i su cs q l i' su' cs' q' 
+          . PathFinder' (  old 
+                      :> 'Leaf_ (Slot i su cs q)
+                      :> 'Down_ cs
+                      :> 'Branch_ (l ':= Slot i' su' cs' q' )
+                      :> 'Leaf_ (Slot i' su' cs' q'))
+         -> Label l 
+childLbl (Child' i _) = Label @l
 
 type family JoinPath (p1 :: PathDir) (p2 :: PathDir) :: PathDir where 
   JoinPath (old :> 'Leaf_ (Slot i su cs q)) ('Begin :> 'Leaf_ (Slot i su cs q)) = (old :> 'Leaf_ (Slot i su cs q)) 
@@ -596,17 +604,23 @@ instance ( JoinPathC start (old :> 'Leaf_ slot' )
         => JoinPathC start (old ':> 'Leaf_ slot' :> Up_ slot) where 
             joinPath old (Parent rest) = Parent (joinPath old rest)
 
-class (JoinPathC parent child, FixPathC (JoinPath parent child)) => ExtendPath parent child where 
+class (JoinPathC parent child
+     , FixPathC (JoinPath parent child)
+     , EndOf (FixPath (JoinPath parent child)) 
+     ~ EndOf child ) => ExtendPath parent child where 
   extendPath :: PathFinder 'Begin parent 
              -> PathFinder 'Begin child 
              -> PathFinder' (FixPath (JoinPath parent child))
   extendPath p1 p2 = fixPath $ joinPath p1 p2 
 
-instance (JoinPathC parent child, FixPathC (JoinPath parent child)) => ExtendPath parent child 
+instance (JoinPathC parent child
+     , FixPathC (JoinPath parent child)
+     , EndOf (FixPath (JoinPath parent child)) 
+     ~ EndOf child ) => ExtendPath parent child 
 
 data PathFinder :: PathDir -> PathDir -> Type where 
   Here :: forall start slot  su cs q i 
-        . (slot ~ (Slot i su cs q), Ord i) 
+        . (slot ~ Slot i su cs q, Ord i) 
        => PathFinder start (start :> 'Leaf_ (Slot i su cs q))
 
   Child :: forall l q i su i' su' cs' q' cs root old start 
@@ -623,9 +637,17 @@ data PathFinder :: PathDir -> PathDir -> Type where
           . PathFinder start (old :> 'Leaf_ slot)
          -> PathFinder start (old :> 'Leaf_ slot :> Up_  slot')
 
+
+
 data HasA :: (k -> Constraint) -> (k -> Type) -> Type -> Type where 
-  HasA :: forall k (a :: k) (f :: k -> Type) (c :: k -> Constraint) t 
-       . (c a, t ~ f a) => f a -> HasA c f t
+  HasA :: forall k 
+                (a :: k) 
+                (f :: k -> Type) 
+                (c :: k -> Constraint) 
+                t 
+       . ( c a
+         , t ~ f a
+         ) => f a -> HasA c f t
 
 data HasW :: (k -> Constraint) -> (k -> Type) -> Type -> Type where 
   HasW :: forall k (a :: k) (f :: k -> Type) (c :: k -> Constraint) t 
@@ -673,13 +695,6 @@ instance c a => WrapsC (f :: k -> Type) (c :: k -> Constraint) (a :: k)
 
 type AllHave :: (k -> Type) -> (k -> Constraint) -> Row Type -> Constraint 
 type AllHave f c slots = Forall slots (Has c f)  
-
-allHave :: forall k (f :: k -> Type) (c :: k -> Constraint) (slots :: Row Type) (xs :: Row k)
-         . ( AllHave f c slots 
-           , R.Map f xs ~ slots)
-        => Rec slots 
-        -> Rec (R.Map f xs)
-allHave = id 
 
 type CheckDeps slot slots = AllHave (PathFinder 'Begin) (Rooted slot) slots 
 

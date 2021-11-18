@@ -289,24 +289,166 @@ class DeepCF c slot => DeepC c slot where
 
 instance DeepCF c slot => DeepC c slot 
 
-type Joined :: PathDir -> Type -> Type 
+type Joined :: PathDir -> PathDir -> Type 
 data Joined parent child where 
-  MkJoined :: PathFinder' (FixPath (JoinPath parent child)) -> Joined parent (PathFinder 'Begin child) 
+  MkJoined :: PathFinder' (FixPath (JoinPath parent child)) 
+           -> Joined parent  child
+
+type EndOfF :: Type -> SlotData 
+type family EndOfF path where 
+  EndOfF (PathFinder 'Begin path) = EndOf path 
 
 
-mapHas :: forall f c children 
+type Directed :: PathDir ->  PathDir -> Type 
+data Directed parent child where 
+  MkDirected :: Path (RootOf (FixPath (JoinPath parent child))) (EndOf (FixPath (JoinPath parent child)))
+             -> Directed parent child 
+
+
+-- this is really neat 
+allHave :: forall f c children 
         . AllHave f c children
        => Rec children 
        -> Rec (R.Map (HasA c f) children)
-mapHas = undefined 
+allHave = R.map @(Has c f) go 
+  where 
+    go :: forall t 
+        . Has c f t 
+       => t 
+       -> HasA c f t 
+    go t = case hasW :: HasW c f t of 
+      h@HasW -> HasA t 
+
+-- finish tomorrow
+locate :: forall i su cs q  target 
+        . Path (Slot i su cs q) target 
+       -> Entity (Slot i su cs q) 
+       -> STM (Maybe (Entity target))
+locate (MkPath pf') e = go e pf'
+  where 
+   go :: forall path
+       . (RootOf path ~ Slot i su cs q, EndOf path ~ target)  
+      => Entity (Slot i su cs q) 
+      -> PathFinder' path 
+      -> STM (Maybe (Entity target))
+   go (Entity e) Here' = pure . Just $ Entity e 
+   go (Entity e) child@(Child' i rest) = case normalizePF child of 
+     (Leaf' i (Branch' s@SlotKey (Down' rest'))) -> 
+       withDict (deriveStoreHas s) $ do 
+         ExEvalState (EvalState _ _ storage _ _ _) <- pos <$> readTVar e 
+         let box = lookupStorage s storage 
+         error "boom"
+         -- CANT DO IT ALL IN ONE FUNCTION, too many nested existentials
+
+
+-- HasA c f t ==> forall a. t ~ f a, c a 
+-- HasA2 ==> forall a. t ~ f a, t' ~ g a, c a 
+
+data MapExists :: (k -> Constraint) ->  (k -> Type) -> (k -> Type) -> Type -> Type where 
+  MapExists :: forall k 
+                 (f :: k -> Type)
+                 (g :: k -> Type)
+                 (c :: k -> Constraint)
+                 t 
+         . (forall (x :: k). c x => f x -> g x)
+           -> HasA c f t 
+           -> MapExists c f g t
+
+extractEx :: forall c f g t t' a. (t ~ f a, t' ~ g a) => MapExists c f g t -> t'
+extractEx mx@(MapExists f (HasA ft)) = case hasW :: HasW c f t of 
+  HasW -> f ft 
+
+
+rmapEx :: MapExists c f g t
+         -> (forall (x :: k). c x => g x -> h x)
+         -> MapExists c f h t
+rmapEx mx@(MapExists f (HasA ft)) g = MapExists (g . f) (HasA ft)
+
+exMap :: forall c f g t r
+       . MapExists c f g t
+      -> (forall a. c a => g a -> r)
+      -> r 
+exMap (MapExists f (HasA ft)) g = g (f ft)
+
+allTransform :: forall c f g h children 
+              . Forall children Unconstrained1 
+             => Rec (R.Map (MapExists c f g) children)
+             -> (forall x. c x => g x -> h x) 
+             -> Rec (R.Map (MapExists c f h) children)
+allTransform old f = R.transform' @children @(MapExists c f g) @(MapExists c f h) go old 
+  where 
+    go :: forall t. MapExists c f g t -> MapExists c f h t
+    go mx = rmapEx mx f 
+
+allTo :: forall f g c children 
+       .  Forall children (Has c f) 
+      => (forall a. c a => f a -> g a ) 
+      -> Rec (R.Map (HasA c f ) children)
+      -> Rec (R.Map (MapExists c f g) children)
+allTo f = R.transform @(Has c f) @children @(HasA c f) @(MapExists c f g) go 
+  where 
+    go :: forall t. Has c f t => HasA c f t -> MapExists c f g t 
+    go (HasA ft) = MapExists f (HasA ft)
+
 
 
 unifyPaths :: forall parent children 
+            . ( Forall children (Has (ExtendPath parent) (PathFinder 'Begin))
+              , Forall children Unconstrained1)
+           => PathFinder 'Begin parent 
+           -> Rec children 
+           -> Rec (R.Map (MapExists (ExtendPath parent) (PathFinder 'Begin) (Directed parent)) children)
+unifyPaths pt rs = c 
+  where 
+    a :: Rec (Map (HasA (ExtendPath parent) (PathFinder 'Begin)) children)
+    a = allHave 
+          @(PathFinder 'Begin) 
+          @(ExtendPath parent)  
+          rs 
+
+    b :: Rec (R.Map (MapExists (ExtendPath parent) (PathFinder 'Begin) (Joined parent)) children)
+    b = allTo 
+          @(PathFinder 'Begin) 
+          @(Joined parent) 
+          @(ExtendPath parent) 
+          @children 
+          f a 
+
+    c :: Rec (R.Map (MapExists (ExtendPath parent) (PathFinder 'Begin) (Directed parent)) children)
+    c = allTransform 
+          @(ExtendPath parent) 
+          @(PathFinder 'Begin) 
+          @(Joined parent) 
+          @(Directed parent) 
+          @children 
+          b g 
+
+    f :: forall (x :: PathDir). ExtendPath parent x => PathFinder 'Begin x -> Joined parent x 
+    f pf = MkJoined $ extendPath pt pf 
+
+    g :: forall (x :: PathDir). ExtendPath parent x => Joined parent x -> Directed parent x
+    g (MkJoined pf) = MkDirected (MkPath pf)
+
+{-- 
+unifyPaths2 :: forall parent children 
+             . ( Forall children Unconstrained1
+               , Forall (R.Map (Directed (RootOf parent)) children) Unconstrained1)
+            => Rec (R.Map (Joined parent) children)
+            -> Rec (R.Map (Directed (RootOf parent)) children)
+unifyPaths2  = R.transform' @children @(Joined parent) @(Directed (RootOf parent)) go 
+  where 
+    go :: forall path
+        .  Joined parent path
+        -> Directed (RootOf parent) path
+    go (MkJoined pf') = undefined -- MkDirected $ MkPath pf'
+
+
+unifyPaths1 :: forall parent children 
             . AllExtend parent children 
            => PathFinder 'Begin parent 
            -> Rec children 
            -> Rec (R.Map (Joined parent) children)
-unifyPaths parent  = R.map @(Has (ExtendPath parent) (PathFinder 'Begin)) go' 
+unifyPaths1 parent  = R.map @(Has (ExtendPath parent) (PathFinder 'Begin)) go' 
   where 
     go' :: forall t. Has (ExtendPath parent) (PathFinder 'Begin) t => t -> Joined parent t
     go' = go parent 
@@ -318,3 +460,5 @@ unifyPaths parent  = R.map @(Has (ExtendPath parent) (PathFinder 'Begin)) go'
        -> Joined parent t
     go p c = case hasW :: HasW (ExtendPath parent) (PathFinder 'Begin) t of
       h@HasW -> MkJoined $ extendPath p c 
+
+--}
