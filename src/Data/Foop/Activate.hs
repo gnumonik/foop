@@ -17,7 +17,7 @@ import Data.Constraint
 --   directly from the rest of the program.
 activate :: forall surface children query deps 
           . (SlotOrdC (Slot () surface children query))
-         => Model ('Begin :> 'Leaf_ (Slot () surface children query)) deps (Slot () surface children query)
+         => Model deps (Slot () surface children query)
          -> IO (Object (Slot () surface children query))
 activate (Model espec@MkSpec{..}) =  do 
       let storage = mkStorage (Proxy @children)

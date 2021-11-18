@@ -215,11 +215,12 @@ applyPath path = path
 applyPathN :: forall slot p. RootOf p ~ slot => NormalizedPath p -> NormalizedPath p 
 applyPathN path = path 
 
-
-
-applyAtlas :: forall slot paths parent. Forall paths (Rooted slot) => Atlas parent paths -> Atlas parent paths 
-applyAtlas = id 
-
+{--
+findPath :: forall start end. Path start end -> Entity start -> STM (Maybe (Entity end))
+findPath (MkPath path) (Entity e) = readTVar e >>= go path 
+  where 
+  --  go ::  PathFinder' path -> EntityStore root loc su cs q -> STM (Maybe (Entity end))
+--}
 
 
 
@@ -288,4 +289,32 @@ class DeepCF c slot => DeepC c slot where
 
 instance DeepCF c slot => DeepC c slot 
 
+type Joined :: PathDir -> Type -> Type 
+data Joined parent child where 
+  MkJoined :: PathFinder' (FixPath (JoinPath parent child)) -> Joined parent (PathFinder 'Begin child) 
 
+
+mapHas :: forall f c children 
+        . AllHave f c children
+       => Rec children 
+       -> Rec (R.Map (HasA c f) children)
+mapHas = undefined 
+
+
+unifyPaths :: forall parent children 
+            . AllExtend parent children 
+           => PathFinder 'Begin parent 
+           -> Rec children 
+           -> Rec (R.Map (Joined parent) children)
+unifyPaths parent  = R.map @(Has (ExtendPath parent) (PathFinder 'Begin)) go' 
+  where 
+    go' :: forall t. Has (ExtendPath parent) (PathFinder 'Begin) t => t -> Joined parent t
+    go' = go parent 
+
+    go :: forall t
+        . Has (ExtendPath parent) (PathFinder 'Begin) t
+       => PathFinder 'Begin parent  
+       -> t
+       -> Joined parent t
+    go p c = case hasW :: HasW (ExtendPath parent) (PathFinder 'Begin) t of
+      h@HasW -> MkJoined $ extendPath p c 

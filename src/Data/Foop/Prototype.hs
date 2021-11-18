@@ -1,5 +1,6 @@
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE LiberalTypeSynonyms #-}
 module Data.Foop.Prototype where
 
 
@@ -14,7 +15,7 @@ import qualified Data.Map as M
 import Data.Constraint
 import Control.Concurrent.STM
 import qualified Data.Constraint.Forall as DC
-
+import Control.Comonad.Store 
 
 
 mapE :: forall k (c :: k -> Constraint) (a :: k) r r'  
@@ -43,24 +44,27 @@ emptySlots = Proxy
 -- | Makes a renderer that always returns (IO ()) as the side effect of rendering 
 mkSimpleRender :: (state -> surface) 
                -> Renderer state surface 
-mkSimpleRender f = MkRenderer f (const $ pure ()) 
-
-
-
+mkSimpleRender f = MkRenderer f (const $ pure ())
 
 -- | `queryHandler` takes a function of type (forall x. query x -> EntityM slots state query m)
 --   and packages it into a boxed natural transformation. 
-queryHandler :: forall query slots state loc 
-        . (query ~> EntityM loc slots state query IO)
-       -> AlgebraQ query :~> EntityM loc slots state query IO 
+queryHandler :: forall query slots state deps 
+        . (query ~> EntityM deps slots state query IO)
+       -> AlgebraQ query :~> EntityM deps slots state query IO 
 queryHandler eval = NT $ \(Q q) -> unCoyoneda (\g -> fmap g . eval) q 
 
 
+mkQHandler :: forall slot query deps  slots state  
+            . MkPaths slot deps 
+           -> (forall x. MkPaths slot deps -> query x -> EntityM  deps slots state query IO x)
+           -> QHandler slot query deps slots state 
+mkQHandler paths eval = QHandler $ store (accessor eval) paths 
+  where 
+    accessor :: (forall x. MkPaths slot deps -> query x -> EntityM deps slots state query IO x)
+             -> MkPaths slot deps
+             -> AlgebraQ query :~> EntityM deps slots state query IO
+    accessor f' paths = NT $ \(Q q) -> unCoyoneda (\g -> fmap g . eval paths) q 
 
-{--
-    go :: (forall x. query x -> EntityM c slots state query IO x) -> (AlgebraQ query :~> EntityM c slots state query IO)
-    go  f = NT $ \(Q q) -> unCoyoneda (\g -> fmap  g . f ) q
---}
 unCoyoneda :: forall (q :: Type -> Type) 
                       (a :: Type) 
                       (r :: Type)
@@ -68,7 +72,6 @@ unCoyoneda :: forall (q :: Type -> Type)
             -> Coyoneda q a 
             -> r 
 unCoyoneda f (Coyoneda ba fb) = f ba fb  
-
 
 unboxContext :: forall c r. TBoxedContext c 
              -> (forall cxt. Dict (c cxt) -> TVar (RenderLeaf cxt) -> r)
@@ -80,56 +83,4 @@ unboxContext' :: forall (c :: SlotData -> Constraint) r. TBoxedContext c
              -> (forall i su cs q. Dict (c (Slot i su cs q)) -> TVar (RenderLeaf (Slot i su cs q)) -> r)
              -> r 
 unboxContext' (TBoxedContext cxt) f = f Dict  cxt 
-
-{--
-withModel :: forall surface slots query loc r 
-           . Model surface slots query loc 
-          -> TBoxedContext c 
-          -> (forall state cxt
-              . c cxt 
-             => TVar (RenderLeaf cxt)
-             -> Spec slots surface state query c 
-             -> r) 
-          -> r 
-withModel m box f = unboxContext box $ \d t -> go  d m t   f
-  where 
-    go :: forall cxt. 
-          Dict (c cxt) 
-       -> Model surface slots query c  
-       -> TVar (RenderLeaf cxt) 
-       -> (forall state cxt
-              . c cxt 
-             => TVar (RenderLeaf cxt)
-             -> Spec slots surface state query c 
-             -> r) 
-       -> r
-    go d@Dict (Model spec) tv g = g tv (spec Dict)
---}
-
-{--
--- | Constructs a Prototype provides the Row of Slotdata for the prototype satisfies SlotConstraint
-prototype :: forall slots surface query state context
-           . (SlotConstraint slots, SlotOrdC context)
-          => Spec slots surface state query context
-          -> Prototype surface slots query context
-prototype = Prototype 
---}
-
-{--
-mkModel :: forall surface slots query (c :: SlotData -> Constraint ) state  
-         . (SlotConstraint slots )
-        =>  Proxy state -> (forall context. c context => Spec slots surface state query context)
-        -> Model surface slots query c
-mkModel proxy f = Model f 
---}
-{--
--- don't export
-mapSlots :: (Rec (MkRenderTree slots) -> Rec (MkRenderTree slots)) -> RenderNode r slots -> RenderNode r slots 
-mapSlots f (RenderNode r slots) = RenderNode r (f slots)
-
-instance (Forall (MkRenderTree slots) Show, Show r) => Show (RenderNode r slots) where 
-  show (RenderNode r tree) = "RenderNode " <> show r <> " " <> show tree 
---}
-
-
 

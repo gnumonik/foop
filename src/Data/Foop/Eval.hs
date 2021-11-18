@@ -64,9 +64,9 @@ new_ :: forall index surface slots query context deps root
           , Forall slots SlotOrdC
           ) => PathFinder' root 
             -> TMVar (Entity (RootOf root))
-            -> Model root deps (Slot index surface slots query) 
+            -> Model deps (Slot index surface slots query) 
             -> IO (Entity (Slot index surface slots query))
-new_ path tmv (Model spec@(MkSpec iState qHandler renderR slots deps)) = do 
+new_ path tmv (Model spec@(MkSpec iState qHandler renderR slots )) = do 
   let eState = initE path tmv spec 
   e <- newTVarIO $ mkEntity_ @index eState 
   pure $ Entity e 
@@ -82,7 +82,7 @@ new_' :: forall root surface slots query i state deps
         . ( Forall slots SlotOrdC
           , SlotConstraint slots
           )
-       => Spec ('Begin ':> 'Leaf_ (Slot () surface slots query)) deps state (Slot i surface slots query)  
+       => Spec deps state (Slot i surface slots query)  
        -> Rec (MkStorage slots) 
        -> surface 
        -> RenderTree slots 
@@ -107,7 +107,7 @@ initE :: forall slots surface st q deps  root i
        . ( SlotConstraint slots)
       => PathFinder' root 
       -> TMVar (Entity (RootOf root))
-      -> Spec root deps st (Slot i surface slots q)
+      -> Spec deps st (Slot i surface slots q)
       -> EvalState root deps slots surface st q 
 initE path tmv espec@MkSpec{..}
   = EvalState {_entity      = espec
@@ -127,9 +127,9 @@ mkEntity_ e@EvalState{..} = store go (ExEvalState e)
   where
     go :: ExEvalState root loc surface slots query 
        -> Transformer root loc surface slots query
-    go ex@(ExEvalState est@(EvalState entity@(MkSpec iState hQuery rendr proxy deps) sta str su loc env)) 
+    go ex@(ExEvalState est@(EvalState entity@(MkSpec iState (QHandler hQuery) rendr proxy) sta str su loc env)) 
       = Transformer $ \qx -> 
-          case apNT hQuery (Q . liftCoyoneda $ qx)  of 
+          case apNT (extract hQuery) (Q . liftCoyoneda $ qx)  of 
             EntityM m -> do  
               let st = foldF (evalF  (EvalState entity sta str su loc env)) m
               ST.runStateT st ex
@@ -147,15 +147,15 @@ run i (Entity tv) = do
 
 -- internal, don't export
 -- | Retrieves the map of the entity's children. For internal use.
-getSlot :: forall  label slots slot st q context
+getSlot :: forall  label slots slot st q deps 
          . (ChildC label slots slot, SlotConstraint slots)
-        => EntityM context slots st q IO (StorageBox slot)
+        => EntityM deps slots st q IO (StorageBox slot)
 getSlot = EntityM . liftF $ GetSlot (SlotKey :: SlotKey label slots slot) id
 
 -- don't export 
 -- | `getSlot` but with a SlotKey (which serves as a dictionary for ChildC) instead of the ChildC constraint 
 getSlot' ::  SlotKey label slots slot
-         -> EntityM context slots state query IO (StorageBox slot)
+         -> EntityM deps slots state query IO (StorageBox slot)
 getSlot' slot = EntityM . liftF $ GetSlot slot id
 
 -- | Construct a `Tell` query from a data constructor of a query algebra
@@ -170,18 +170,18 @@ mkTell q  = q ()
 --   for the label (it should *only* require one for the label). 
 -- 
 --   E.g. `tell @"childLabel" 123 MyQuery`
-tell :: forall label slots i su cs q state query cxt 
+tell :: forall label slots i su cs q state query deps  
       . (ChildC label slots '(i,su,RenderTree cs,q), SlotConstraint slots)
      => i
      -> Tell q
-     -> EntityM cxt slots state query IO ()
+     -> EntityM deps slots state query IO ()
 tell i = tell_ @label (Indexed Index i)
 
-tell_ :: forall label slots i su cs q state query cxt 
+tell_ :: forall label slots i su cs q state query deps 
       . (ChildC label slots '(i,su,RenderTree cs,q), SlotConstraint slots)
      => Indexed '(i,su,RenderTree cs,q)
      -> Tell q
-     -> EntityM cxt slots state query IO ()
+     -> EntityM deps slots state query IO ()
 tell_ i q = do
   MkStorageBox mySlot <- getSlot @label
   case M.lookup  i mySlot of
@@ -195,10 +195,10 @@ tell_ i q = do
 --    Like `tell`, this requires a type application for the child label. 
 -- 
 --    E.g. `tell @"childLabel" MyQuery` 
-tellAll :: forall label i su cs q slots state query cxt
+tellAll :: forall label i su cs q slots state query deps 
       . (ChildC label slots '(i,su,RenderTree cs,q), SlotConstraint slots)
      => Tell q
-     -> EntityM cxt slots state query IO ()
+     -> EntityM deps slots state query IO ()
 tellAll q = do
   MkStorageBox mySlot <- getSlot @label @slots @'(i,su,RenderTree cs,q)
   let slotKeys = M.keys mySlot
@@ -213,18 +213,18 @@ tellAll q = do
 --   Like `tell`, this requires a type application for the child label. 
 --   
 --   e.g. `request @"childLabel" 123 MyQuery`   
-request :: forall label i su cs q slots state query x cxt 
+request :: forall label i su cs q slots state query x deps  
       . (ChildC label slots '(i,su,RenderTree cs,q), SlotConstraint slots)
      => i
      -> Request q x
-     -> EntityM cxt slots state query IO (Maybe x)
+     -> EntityM deps slots state query IO (Maybe x)
 request i = request_ @label (Indexed Index i)
 
-request_ :: forall label i su cs q slots state query x cxt
+request_ :: forall label i su cs q slots state query x deps 
       . (ChildC label slots '(i,su,RenderTree cs,q), SlotConstraint slots)
      => Indexed '(i,su,RenderTree cs,q)
      -> Request q x
-     -> EntityM cxt slots state query IO (Maybe x)
+     -> EntityM deps slots state query IO (Maybe x)
 request_ i q = do
   MkStorageBox mySlot <- getSlot @label
   case M.lookup i mySlot of
@@ -234,10 +234,10 @@ request_ i q = do
       pure (Just o)
 
 -- | Like `tellAll` but for requests. Requires a type application for the child label.
-requestAll :: forall label i su cs q slots state query cxt x 
+requestAll :: forall label i su cs q slots state query deps x 
       . (ChildC label slots '(i,su,RenderTree cs,q), SlotConstraint slots)
      => Request q x
-     -> EntityM cxt slots state query IO [x]
+     -> EntityM deps slots state query IO [x]
 requestAll q = do
   MkStorageBox mySlot <- getSlot @label
   let slotKeys = M.keys mySlot
@@ -284,8 +284,8 @@ evalF eState@EvalState{..} = \case
       pure $ withDict d (leaf ^. g)
 --}
   Query q -> case _entity of 
-    MkSpec iState hQuery renderR proxy deps  -> 
-      case apNT hQuery (Q q) of
+    MkSpec iState (QHandler hQuery) renderR proxy   -> 
+      case apNT (extract hQuery) (Q q) of
         EntityM ef -> foldF (evalF (EvalState {..})) ef
 
   GetSlot slot f ->  pure . f $ lookupStorage slot _storage
@@ -318,37 +318,26 @@ evalF eState@EvalState{..} = \case
 -- | Deletes a child entity (and its rendered output in the renderTree).
 --   
 --   Requires a type application for the label 
-delete :: forall label slots state i su cs q query cxt
+delete :: forall label slots state i su cs q query deps
       . (ChildC label slots '(i,su,RenderTree cs,q), Forall slots SlotOrdC)
      => i
-     -> EntityM cxt slots state query IO ()
+     -> EntityM deps slots state query IO ()
 delete i = EntityM . liftF $ Delete (SlotKey :: SlotKey label slots '(i,su,RenderTree cs,q)) i ()
 
 -- | Creates a child component at the designaed label and index from the Prototype argument.
 -- 
 --   Requires a type application for the label.
 
-
-
-
-create :: forall l i cs m su q deps slot state query slots r ds. (Functor m, Ord i, Forall slots SlotOrdC, Forall cs SlotOrdC,
+create :: forall l i cs su q deps slot state query slots  ds. (Ord i, Forall slots SlotOrdC, Forall cs SlotOrdC,
  KnownSymbol l, HasType l (Slot i su cs q) slots) =>
   i
-  -> Model r ds (Slot i su cs q)
-  -> EntityM deps slots state query m ()
+  -> Model  ds (Slot i su cs q)
+  -> EntityM deps slots state query IO ()
 create i p = EntityM . liftF $ Create (SlotKey @l )   i p ()
 
-observe_ :: forall l m deps a slots state query. (Functor m, KnownSymbol l) 
+observe_ :: forall l m deps a slots state query path 
+          . (Functor m, KnownSymbol l, HasType l (PathFinder 'Begin path) deps) 
          => Label l
-         -> (TraceS (deps .! l) -> a) 
+         -> (TraceS path -> a) 
          -> EntityM deps slots state query m a
 observe_ path f = EntityM . liftF $ Observe path f 
---}
-{--
-open' :: forall label slots i su cs q state query c r 
-      . (ChildC label slots '(i,su,RenderTree cs,q))
-     => (forall i su cs q . c '(i,su,cs,q) => Getter (RenderLeaf '(i,su,cs,q)) r) 
-     -> EntityM c slots state query IO r
-open' f = EntityM . liftF $ Context f 
-
---}
