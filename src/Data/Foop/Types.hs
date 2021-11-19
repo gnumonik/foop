@@ -255,7 +255,7 @@ data ExEvalState :: PathDir -> Row Type -> Type -> Row SlotData -> (Type -> Type
 -- | `Transformer surface query` is a newtype wrapper over `forall x. query x -> IO (x,ExEvalState surface query)`
 --  
 --   This mainly serves to make reasoning about the EntityStore comonad less painful, and to 
---   signficantly improve the readability of type signatures 
+--   signficantly improve the readability of type 
 data Transformer root loc surface slots query where 
    Transformer :: 
      (forall x. query x -> IO (x,ExEvalState root loc surface slots query)) -> Transformer root loc surface slots query 
