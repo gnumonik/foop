@@ -13,13 +13,11 @@ import Control.Concurrent.STM ()
 import Data.Row.Internal
 import Data.Default
 import qualified Data.Constraint.Forall as DC  
-import Control.Monad.Identity
 import Data.Constraint
 import Data.Foop.Slot
-import Control.Lens (view, (^?))
 import qualified Data.Row.Records as R
 import Data.Kind
-
+import Data.Foop.Exists
 
 -- Example #1: A Simple Counter 
 
@@ -51,19 +49,9 @@ returning x m = m >> pure x
 
 -- counter :: Prototype String CounterLogic 
 
-
-
 type TOP :: forall k. k -> Constraint 
 class TOP c 
 instance TOP c 
-
-
-mkQHandler_ :: forall slot query slots state 
-             . (forall x. query x -> EntityM  Empty slots state query IO x)
-             -> QHandler slot query Empty slots state
-mkQHandler_ f = mkQHandler NoDeps (const f)   
-
-noDeps = MkPaths R.empty 
 
 
 
@@ -75,22 +63,22 @@ counter =  Model $ MkSpec {
   , renderer     = mkSimpleRender show  -- this is a function from the component's state to its surface
   , slots        = emptySlots 
   }
+ where 
+  runCounterLogic =  \case 
+    GetCount f -> f <$> get 
 
-runCounterLogic =  \case 
-  GetCount f -> f <$> get 
+    Tick x -> returning x $ modify' (+1)   
 
-  Tick x -> returning x $ modify' (+1)   
+    Reset x -> do 
+      -- badoop <- observe_ (Start ||> Up) (const ())
+    -- BoxedContext t <- lewk 
+    -- let hm = t ^? deep
+    -- _ <- open' (deep) >> pure () 
+      pure x 
 
-  Reset x -> do 
-    -- badoop <- observe_ (Start ||> Up) (const ())
-   -- BoxedContext t <- lewk 
-   -- let hm = t ^? deep
-   -- _ <- open' (deep) >> pure () 
-    pure x 
-
-  PrintCount x -> returning x $ do 
-    s <- get 
-    liftIO (print s)
+    PrintCount x -> returning x $ do 
+      s <- get 
+      liftIO (print s)
 
 -- If we wanted to use our counter Entity as a Root Entity, 
 -- that is, a top-level entity which does not have parents and against which 
@@ -100,14 +88,11 @@ runCounterLogic =  \case
 printCount' :: Object (Slot () s cs CounterLogic) -> IO ()
 printCount' = tell' PrintCount 
 
-
 getCount' :: Object (Slot () s cs CounterLogic) -> IO Int
 getCount' = request' GetCount 
 
-
 tick' :: Object (Slot () s cs CounterLogic) -> IO ()
 tick' = tell' Tick  
-
 
 reset' :: Object (Slot () s cs CounterLogic) -> IO ()
 reset' = tell' Reset
@@ -178,11 +163,31 @@ instSlots :: forall slots i deps state surface query
       -> Spec deps state (Slot i surface slots query)
 instSlots = id 
 
-
-
-
-
-
+counters :: (Exists
+   (Rooted
+      (Slot
+         i1
+         String
+         ('R
+            '[ "counterA"
+               ':-> '(String, String, RenderTree Empty, CounterLogic),
+               "counterB" ':-> '(Char, String, RenderTree Empty, CounterLogic)])
+         CountersLogic))
+   (PathFinder 'Begin)
+   (PathFinder start (start ':> 'Leaf_ (Slot i2 su cs q))),
+ Ord i2) =>
+  Model
+    ('R
+      '[ "here"
+          ':-> PathFinder start (start ':> 'Leaf_ (Slot i2 su cs q))])
+    (Slot
+      i1
+      String
+      ('R
+          '[ "counterA"
+            ':-> '(String, String, RenderTree Empty, CounterLogic),
+            "counterB" ':-> '(Char, String, RenderTree Empty, CounterLogic)])
+      CountersLogic)
 counters =  Model $ MkSpec {
     initialState = ()
   , handleQuery = mkQHandler myPaths runCounters 
@@ -206,7 +211,7 @@ counters =  Model $ MkSpec {
       pure x 
 
     TellCounter k t x  -> do  
-      hm <- observe_ #here id
+    --  hm <- observe_ #here id
       either (\i -> tell @"counterA" i t) (\i -> tell @"counterB" i t) k 
       pure x  
 

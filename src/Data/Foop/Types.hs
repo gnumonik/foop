@@ -22,28 +22,21 @@ import Data.Default
 import qualified Data.Row.Records as R
 import Data.Constraint
 import qualified Data.Constraint.Forall as DC
-import Control.Lens (Fold, to, Lens')
-import Control.Lens.Getter
 import Data.Type.Equality (type (:~:))
-import Control.Concurrent.STM (TMVar)
+import Control.Concurrent.STM (TMVar, STM)
 import Data.Functor.Constant
-import Data.Row.Dictionaries (IsA(..),As(..),ActsOn(..),As'(..))
-import Data.Singletons (KindOf)
+import Data.Row.Dictionaries (IsA(..),As(..),ActsOn(..),As'(..), Unconstrained1)
 import Data.Type.Equality (type (:~:)(Refl))
+import Data.Foop.Exists 
 
 
 {-- 
 
-Ok so: 
+Important observations!!
+  Every part of the path to an entity's current location must exist if the entity does 
 
-The EntityF/EntityM free monad stuff only carries dependencies. It's slot is implicit 
-(i.e. the Ord i constraint technically needs to be explicitly satisfied at *some point*)
+  
 
-Spec is the non-existentially-hidden configuration data type for an entity. The ord i constrain can still 
-be implicit here. 
-
-EvalState requires the path to be fully instantiated. Need some way of expressing the constraint that 
-all of the dependency paths are satisfied. 
 
 --}
 
@@ -85,15 +78,15 @@ data EntityF deps slots state query m a where
   State   :: (state -> (a,state)) -> EntityF deps slots state query m a
 
   Lift    :: m a -> EntityF deps slots state query m a
-
+{--
   Observe :: (HasType l (PathFinder 'Begin path) deps, KnownSymbol l)
           => Label l 
-          -> (TraceS path -> a)
+          -> (RenderLeaf (EndOf path) -> a)
           -> EntityF deps slots state query m a 
-
+--}
   Interact :: (HasType l (PathFinder 'Begin path) deps, KnownSymbol l)
           => Label l 
-          -> (TraceE path -> a)
+          -> (Entity (EndOf path) -> a)
           -> EntityF deps slots state query m a 
 
   Query    :: Coyoneda query a -> EntityF deps slots state query m a
@@ -103,6 +96,7 @@ data EntityF deps slots state query m a where
            -> EntityF deps slots state query m a
 
   Create   :: SlotKey l slots (Slot i su cs q)
+           -> Label l 
            -> i
            -> Model ds (Slot i su cs q)
            -> a 
@@ -117,11 +111,11 @@ instance Functor m => Functor (EntityF location slots state query m) where
   fmap f =  \case
         State k          -> State (first f . k)
         Lift ma          -> Lift (f <$> ma)
-        Observe path g   -> Observe path (fmap f g)
+      --  Observe path g   -> Observe path (fmap f g)
         Interact path g  -> Interact path (fmap f g) 
         Query qb         -> Query $ fmap f qb
         GetSlot key g    -> GetSlot key $ fmap f g -- (goChild f key g)
-        Create s@SlotKey i e a -> Create s i e (f a)
+        Create s@SlotKey l i e a -> Create s l i e (f a)
         Delete key i a   -> Delete key i (f a)
 
 -- | `EntityM` is the newtype wrapper over the (church-encoded) free monad
@@ -220,13 +214,8 @@ data Renderer  state surface where
   , onRender  :: surface -> IO ()
   } -> Renderer state surface 
 
-newtype Handler query state slots loc 
-  = Handler {
-      runHandler 
-      :: forall r. ((forall x. query x -> EntityM loc slots state query IO x) -> r) -> r}
-
-newtype QHandler slot query deps slots state 
-  = QHandler {getHandler :: Store (MkPaths slot deps) (AlgebraQ query :~> EntityM  deps slots state query IO)}
+newtype Handler slot query deps slots state 
+  = Handler {getHandler :: Store (MkPaths slot deps) (AlgebraQ query :~> EntityM  deps slots state query IO)}
 
 -- | A `Spec` is the GADT from which an Entity is constructed. 
 type Spec ::  Row Type -> Type -> SlotData -> Type 
@@ -234,7 +223,7 @@ data Spec deps state slot where
   MkSpec :: forall state query deps surface slots i.
    ( WellBehaved slots) => 
     { initialState   :: state 
-    , handleQuery    :: QHandler (Slot i surface slots query) query deps slots state  -- AlgebraQ query :~> EntityM deps slots state query IO 
+    , handleQuery    :: Handler (Slot i surface slots query) query deps slots state  -- AlgebraQ query :~> EntityM deps slots state query IO 
     , renderer       :: Renderer state surface 
     , slots          :: Proxy slots
     } -> Spec deps state (Slot i surface slots query)
@@ -266,7 +255,7 @@ data ExEvalState :: PathDir -> Row Type -> Type -> Row SlotData -> (Type -> Type
 -- | `Transformer surface query` is a newtype wrapper over `forall x. query x -> IO (x,ExEvalState surface query)`
 --  
 --   This mainly serves to make reasoning about the EntityStore comonad less painful, and to 
---   make type signatures far more readable. 
+--   signficantly improve the readability of type signatures 
 data Transformer root loc surface slots query where 
    Transformer :: 
      (forall x. query x -> IO (x,ExEvalState root loc surface slots query)) -> Transformer root loc surface slots query 
@@ -341,11 +330,6 @@ type Index' :: SlotData -> Type
 type family Index' slotData where 
   Index' '(i,s,cs,q) = Index '(i,s,cs,q) i
 
-
--- | The first argument to SlotData must satisfy an Ord constraint
-type ChildStorage :: Row SlotData -> Type
-type ChildStorage slots = Rec (MkStorage slots)
-
 newtype StorageBox :: SlotData -> Type where 
   MkStorageBox :: M.Map (Indexed slot) (Entity slot) 
                -> StorageBox slot
@@ -373,35 +357,10 @@ type family ChildC label slots slot where
         , SlotOrdC slot 
         , KnownSymbol label)
 
-type MkRender :: Row SlotData -> Type
-type family MkRender slots where
-  MkRender slots = RenderTree slots 
-
 type SlotConstraint slots = ( Forall slots SlotOrdC 
                             , WellBehaved slots 
                             , AllUniqueLabels (R.Map Proxy slots)
                             , Forall (R.Map Proxy slots) Default)
-
-type Top :: forall k. k -> Constraint 
-class Top (a :: k)
-instance Top (a :: k)
-
--- no way this is gonna work
-
-class (a => b) => Implies a b where 
-  impl :: a :- b 
-
-instance (a => b) => Implies a b where 
-  impl = Sub Dict 
-
-class (forall a. Implies (c1 a) (c2 a)) => Entails c1 c2 where 
-  derive :: forall a. c1 a :- c2 a 
-  derive = Sub Dict 
-
-instance (forall a. Implies (c1 a) (c2 a)) => Entails c1 c2 
-
-testEntailment :: forall c1 c2 a. (Entails c1 c2, c1 a) => Dict (c2 a)
-testEntailment = mapDict (derive @c1 @c2 @a) Dict  
 
 ------ *really* don't want this stuff to be here but need it in scope 
 
@@ -413,16 +372,20 @@ instance RootOf path ~ root => Rooted root path
 
 data MkPaths ::  SlotData -> Row Type -> Type where 
   MkPaths :: forall  slot paths 
-           .  CheckDeps slot paths 
+           .  AllRooted slot paths 
            => Rec paths 
            -> MkPaths slot paths  
 
   NoDeps :: forall slot. MkPaths slot Empty  
 
-type AllRooted slot deps = Forall deps (Rooted slot) 
-
 type family EndOf (p :: PathDir) :: SlotData where 
   EndOf (a :> 'Leaf_ slot) = slot 
+
+type Pointed :: PathDir -> PathDir -> Type
+data Pointed parent child where 
+  MkPointed :: ExtendPath parent child 
+            => ( TMVar (Entity (RootOf parent)) -> STM (Maybe (TraceE (FixPath (JoinPath parent child)))))
+            ->  Pointed parent child
 
 data Path :: SlotData -> SlotData -> Type where 
   MkPath :: ( RootOf path ~ start
@@ -430,53 +393,21 @@ data Path :: SlotData -> SlotData -> Type where
        => PathFinder' path 
        -> Path start end 
 
-data Atlas :: Row Type -> Type where 
-  MkAtlas :: forall rootSlot paths 
-           . AllHave (Path rootSlot) Top paths 
-          => TMVar (Entity rootSlot) 
-          -> Rec paths 
-          -> Atlas paths 
+data Root :: PathDir -> Type where 
+  MkRoot :: TMVar (Entity (RootOf parent))
+         -> Root parent 
 
-unify1 :: forall parent child path start end 
-       . ( ExtendPath parent child ) 
-      => PathFinder 'Begin parent
-      -> PathFinder 'Begin child 
-      -> Path (RootOf (FixPath (JoinPath parent child))) (EndOf (FixPath (JoinPath parent child))) 
-unify1 parent child = MkPath $ extendPath parent child
-
-type AllExtend parent children = Forall children (Has (ExtendPath parent) (PathFinder 'Begin))
-
-type Extends parent child = Has (ExtendPath parent) (PathFinder 'Begin) child 
-
-type UnmapHas :: Row Type -> Row k 
-type family UnmapHas rt where 
-  UnmapHas (R lts) = R (UnmapHasR lts)
-
-type UnmapHasR :: [LT Type] -> [LT k]
-type family UnmapHasR lts where 
-  UnmapHasR '[] = '[]
-  UnmapHasR (l ':-> HasA c f (f a) ': lts) = l ':-> a ': UnmapHasR lts 
-
-
-class c a => Inside (c :: k -> Constraint) (f :: k -> Type) (a :: k) where 
-  inside :: f a -> Dict (c a)
-  inside _ = Dict 
-
-instance c a => Inside (c :: k -> Constraint) (f :: k -> Type) (a :: k)
-
-
-{-- 
-unifyAll :: forall parent children 
-          . ExtendPath parent child 
-         => PathFinder 'Begin parent 
-         -> PathFinder 'Begin child 
-         -> 
---}
+data Atlas :: PathDir -> Row Type -> Type where 
+  MkAtlas :: forall parent children 
+           . TMVar (Entity (RootOf parent)) 
+          -> Unified parent children 
+          -> Atlas parent children
 
 data Crumbs a = Begin | Crumbs a :> a
-
 infixl 1 :>
 deriving instance Show a => Show (Crumbs a) 
+
+type PathDir = Crumbs (T (Row SlotData) Symbol SlotData)
 
 data T a b c  
   = Branch_ (b := c)
@@ -484,20 +415,12 @@ data T a b c
   | Leaf_ c 
   | Up_ c
 
-type PathDir = Crumbs (T (Row SlotData) Symbol SlotData)
-
 type Trail = (T (Row SlotData) Symbol SlotData)
 
 type StorageTree :: Row SlotData -> Type 
 data StorageTree slots where 
   MkStorageTree :: Rec (R.Map StorageBox slots) -> StorageTree slots 
 
-type TraceS :: PathDir -> Type 
-type family TraceS crumbs where 
-  TraceS ('Begin :> 'Leaf_ t)        = RenderLeaf t 
-  TraceS (old :> 'Leaf_ t)           = RenderLeaf t 
-  TraceS (old :> 'Branch_ (l ':= t)) = RenderBranch t 
-  TraceS (old :> 'Down_ t)           = RenderTree t 
 
 type TraceE :: PathDir -> Type 
 type family TraceE crumbs where 
@@ -505,9 +428,6 @@ type family TraceE crumbs where
   TraceE (old :> 'Leaf_ t)           = Entity t 
   TraceE (old :> 'Branch_ (l ':= t)) = StorageBox t
   TraceE (old :> 'Down_ t)           = StorageTree t  
-
-type family Last (p :: PathDir) :: (T (Row SlotData) Symbol SlotData) where 
-  Last (a :> b)   = b  
 
 type family First (p :: PathDir) :: (T (Row SlotData) Symbol SlotData) where 
   First ('Begin :> a) = a 
@@ -517,60 +437,10 @@ type family LeafMe (t :: Trail) :: SlotData where
   LeafMe ('Leaf_ slot) = slot 
   LeafMe ('Up_ slot) = slot 
 
-type family HasLeaf (p :: PathDir) (s :: SlotData) :: Constraint where 
-  HasLeaf ('Begin :> 'Leaf_ slot) slot = ()
-  HasLeaf (old :> 'Leaf_ slot) slot   = ()
-
 type family RootOf (p :: PathDir) :: SlotData where 
   RootOf p = LeafMe (First p)
 
-mapHas :: forall k (c :: k -> Constraint) (f :: k -> Type) (g :: k -> Type) (t :: Type) (t' :: Type) (a :: k) 
-        . ( c a 
-          , t ~ f a
-          , Has c f t
-          , t' ~ g a
-          , Has c g t') 
-         => (forall x. f x -> g x)
-         -> HasA c f t  
-         -> HasA c g t' 
-mapHas f ft = case ft of 
-  HasA fa -> HasA (f fa)
-
-denormalizePF' :: forall path
-                .  PathFinder' path 
-               ->  PathFinder 'Begin path 
-denormalizePF' = \case 
-  Here'  -> Here 
-
-  Child' i p ->  (Child i $ denormalizePF' p) 
-
-data PathFinder' :: PathDir -> Type where 
-  Here' :: forall i su cs q l 
-        . Ord i 
-       =>  PathFinder' ('Begin :> 'Leaf_ (Slot i su cs q))
-
-  -- downward leaf to leaf 
-  Child' :: forall l q i su i' su' cs' q' cs root old
-         . (ChildC l cs (Slot i' su' cs' q')
-           , Ord i'
-           , Forall cs' SlotOrdC
-           , FixPathC (old :> 'Leaf_ (Slot i su cs q))) 
-        => i' 
-        -> PathFinder' (old :> 'Leaf_ (Slot i su cs q)) 
-        -> PathFinder' (  old 
-                      :> 'Leaf_ (Slot i su cs q)
-                      :> 'Down_ cs
-                      :> 'Branch_ (l ':= Slot i' su' cs' q' )
-                      :> 'Leaf_ (Slot i' su' cs' q'))
-childLbl :: forall old i su cs q l i' su' cs' q' 
-          . PathFinder' (  old 
-                      :> 'Leaf_ (Slot i su cs q)
-                      :> 'Down_ cs
-                      :> 'Branch_ (l ':= Slot i' su' cs' q' )
-                      :> 'Leaf_ (Slot i' su' cs' q'))
-         -> Label l 
-childLbl (Child' i _) = Label @l
-
+-- | Joins two compatible paths. Does not overwrite type variables.
 type family JoinPath (p1 :: PathDir) (p2 :: PathDir) :: PathDir where 
   JoinPath (old :> 'Leaf_ (Slot i su cs q)) ('Begin :> 'Leaf_ (Slot i su cs q)) = (old :> 'Leaf_ (Slot i su cs q)) 
 
@@ -579,8 +449,8 @@ type family JoinPath (p1 :: PathDir) (p2 :: PathDir) :: PathDir where
 
   JoinPath start (old :> 'Leaf_ (Slot i su cs q) :> Up_ slot) = JoinPath start old :> 'Leaf_ (Slot i su cs q) :> Up_  slot
 
-class -- Last (JoinPath p1 p2) ~ Last p2 =>  
-  JoinPathC (p1 :: PathDir) (p2 :: PathDir) where 
+-- | Class of sets of paths that can be joined
+class JoinPathC (p1 :: PathDir) (p2 :: PathDir) where 
 
   joinPath :: forall start
             . PathFinder start p1 
@@ -604,10 +474,17 @@ instance ( JoinPathC start (old :> 'Leaf_ slot' )
         => JoinPathC start (old ':> 'Leaf_ slot' :> Up_ slot) where 
             joinPath old (Parent rest) = Parent (joinPath old rest)
 
+
+
+type Unified parent children = Rec (R.Map (Deriving (ExtendPath parent) (PathFinder 'Begin) (Pointed parent)) children)
+
 class (JoinPathC parent child
      , FixPathC (JoinPath parent child)
-     , EndOf (FixPath (JoinPath parent child)) 
-     ~ EndOf child ) => ExtendPath parent child where 
+     , EndOf (FixPath (JoinPath parent child)) ~ EndOf child 
+     , TraceE (FixPath (JoinPath parent child)) ~ TraceE child 
+     , RootOf (FixPath (JoinPath parent child)) ~ RootOf parent 
+     , Locate (RootOf (FixPath (JoinPath parent child))) (FixPath (JoinPath parent child)) ) 
+    => ExtendPath parent child where 
   extendPath :: PathFinder 'Begin parent 
              -> PathFinder 'Begin child 
              -> PathFinder' (FixPath (JoinPath parent child))
@@ -615,9 +492,16 @@ class (JoinPathC parent child
 
 instance (JoinPathC parent child
      , FixPathC (JoinPath parent child)
-     , EndOf (FixPath (JoinPath parent child)) 
-     ~ EndOf child ) => ExtendPath parent child 
+     , EndOf (FixPath (JoinPath parent child)) ~ EndOf child 
+     , TraceE (FixPath (JoinPath parent child)) ~ TraceE child 
+     , RootOf (FixPath (JoinPath parent child)) ~ RootOf parent 
+     , Locate (RootOf (FixPath (JoinPath parent child))) (FixPath (JoinPath parent child)) ) 
+    => ExtendPath parent child      
 
+-- | Serves as a typelevel zipper(-ish thing)
+--   , a witness that various constraints obtain 
+--   , and a term-level representation of a segment 
+--   which connects two entities  
 data PathFinder :: PathDir -> PathDir -> Type where 
   Here :: forall start slot  su cs q i 
         . (slot ~ Slot i su cs q, Ord i) 
@@ -637,66 +521,68 @@ data PathFinder :: PathDir -> PathDir -> Type where
           . PathFinder start (old :> 'Leaf_ slot)
          -> PathFinder start (old :> 'Leaf_ slot :> Up_  slot')
 
+-- | Like PathFinder but "correct by construction"
+--   
+--   I.e. any Object with a slot that matches the 
+--   root slot of the PathDir argument to a PathFinder' 
+--   contains a (potential) path to that end of that PathDir 
+data PathFinder' :: PathDir -> Type where 
+  Here' :: forall i su cs q l 
+        . Ord i 
+       =>  PathFinder' ('Begin :> 'Leaf_ (Slot i su cs q))
+
+  -- downward leaf to leaf 
+  Child' :: forall l q i su i' su' cs' q' cs root old
+         . (ChildC l cs (Slot i' su' cs' q')
+           , Ord i'
+           , Forall cs' SlotOrdC
+           , FixPathC (old :> 'Leaf_ (Slot i su cs q))) 
+        => i' 
+        -> PathFinder' (old :> 'Leaf_ (Slot i su cs q)) 
+        -> PathFinder' (  old 
+                      :> 'Leaf_ (Slot i su cs q)
+                      :> 'Down_ cs
+                      :> 'Branch_ (l ':= Slot i' su' cs' q' )
+                      :> 'Leaf_ (Slot i' su' cs' q'))
+
+-- | Helper GADT for transforming "PathFinder' path"
+--   into an accessor function. (This isn't strictly necessary but 
+--   it greatly simplifies the transformation)
+data NormalizedPath :: PathDir -> Type where 
+  Start' :: forall l i q su cs
+          . ( Ord i) 
+           =>  NormalizedPath ('Begin :> 'Leaf_ (Slot i su cs q))
+
+  Branch' :: forall l i q su cs slots old root 
+         . ( KnownSymbol l
+           , HasType l (Slot i su cs q) slots
+           , Ord i) 
+        => SlotKey l slots (Slot i su cs q) 
+        -> NormalizedPath  (old :> 'Down_ slots) 
+        -> NormalizedPath  ((old :> 'Down_ slots) :> 'Branch_ (l ':= Slot i su cs q))
+
+  Leaf' :: forall q i su cs l slots old root 
+        . Ord i
+       => i
+       -> NormalizedPath  (old :> 'Branch_ (l ':= Slot i su cs q))
+       -> NormalizedPath  ((old :> 'Branch_ (l ':= Slot i su cs q)) :> 'Leaf_ (Slot i su cs q))
+
+  Down' :: forall i su cs q old root 
+         . NormalizedPath (old :> 'Leaf_ (Slot i su cs q))
+        -> NormalizedPath (old :> 'Leaf_ (Slot i su cs q) :> 'Down_ cs)
 
 
-data HasA :: (k -> Constraint) -> (k -> Type) -> Type -> Type where 
-  HasA :: forall k 
-                (a :: k) 
-                (f :: k -> Type) 
-                (c :: k -> Constraint) 
-                t 
-       . ( c a
-         , t ~ f a
-         ) => f a -> HasA c f t
-
-data HasW :: (k -> Constraint) -> (k -> Type) -> Type -> Type where 
-  HasW :: forall k (a :: k) (f :: k -> Type) (c :: k -> Constraint) t 
-       . (c a, t ~ f a) => HasW c f t
-
-type Has :: (k -> Constraint) -> (k -> Type) -> Type -> Constraint 
-class  Has c f t where 
-  has :: forall a. (c a, t ~ f a) => f a -> HasA c f t
-  has = HasA 
-
-  hasW :: HasW c f t 
-
-  unHas :: HasA c f t -> (forall a. c a => f a ~ t => f a -> r) -> r 
-  unHas (HasA x) f = f x 
 
 
- 
-
-instance c a => Has c f (f a) where 
-  hasW = HasW 
-
-instance HasDict (Has c f t) (HasA c f t) where 
-  evidence (HasA x) = Dict 
-
-class Evident (f :: k -> Type) (c :: k -> Constraint) where 
-  withEvidence :: forall x r. f x -> (forall y. c y => f y -> r) -> r 
-
-newtype Wrapped :: (k -> Type) -> k -> Type where 
-  Wrap :: f a -> Wrapped f a 
-
-class Wraps (f :: k -> Type) (a :: k) where 
-  wrap :: f a -> Wrapped f a 
-  wrap = Wrap 
-
-instance Wraps (f :: k -> Type) (a :: k)
-
-data WrappedC :: (k -> Type) -> (k -> Constraint) -> k -> Type where 
-  WrapC :: c a => f a -> WrappedC f c a 
-
-class WrapsC (f :: k -> Type) (c :: k -> Constraint) (a :: k) where 
-  wrapC :: c a => f a -> WrappedC f c a 
-  wrapC = WrapC 
-
-instance c a => WrapsC (f :: k -> Type) (c :: k -> Constraint) (a :: k)
 
 type AllHave :: (k -> Type) -> (k -> Constraint) -> Row Type -> Constraint 
-type AllHave f c slots = Forall slots (Has c f)  
+type AllHave f c slots = Forall slots (Exists c f)  
 
-type CheckDeps slot slots = AllHave (PathFinder 'Begin) (Rooted slot) slots 
+type AllRooted slot slots = AllHave (PathFinder 'Begin) (Rooted slot) slots 
+
+-- | Fixes a path in two senses: Guarantees that a path is fully determinate and "repairs"
+--   paths with indeterminate segments (i.e. segments which contain un-instantiated universally 
+--   bound variables)
 
 type FixPath :: PathDir -> PathDir
 type family FixPath path where 
@@ -728,15 +614,14 @@ instance FixPathC ('Begin :> 'Leaf_ (Slot i su cs q)) where
   fixPath Here = Here' 
 
 instance ( FixPath (old ':> 'Leaf_ (Slot i su cs q)) ~ (FixPath old ':> 'Leaf_ (Slot i su cs q))
-          , FixPathC (old :> 'Leaf_ (Slot i su cs q))
-          , FixPathC (FixPath old ':> 'Leaf_ (Slot i su cs q))
-          )
-     => FixPathC ( old 
+         , FixPathC (old :> 'Leaf_ (Slot i su cs q))
+         , FixPathC (FixPath old ':> 'Leaf_ (Slot i su cs q))
+          ) => FixPathC ( old 
                  :> 'Leaf_ (Slot i su cs q)
                  :> 'Down_ cs
                  :> 'Branch_ (l ':= Slot i' su' cs' q' )
-                 :> 'Leaf_ (Slot i' su' cs' q')) where 
-                   fixPath (Child i rest) = Child' i (fixPath rest)
+                 :> 'Leaf_ (Slot i' su' cs' q')) 
+          where fixPath (Child i rest) = Child' i (fixPath rest)
 
 instance ( FixPathC (old :> 'Leaf_ (Slot i su cs q))
          , FixPath (old ':> 'Leaf_ (Slot i su cs q)) ~ (FixPath old ':> 'Leaf_ (Slot i su cs q))
@@ -759,23 +644,18 @@ instance ValidatePath (old :> 'Leaf_ (Slot i su cs q))
                           :> 'Branch_ (l ':= Slot i' su' cs' q' )
                           :> 'Leaf_ (Slot i' su' cs' q'))
 
-type OKPath :: PathDir -> Constraint 
-type family OKPath path where 
-  OKPath  ('Begin :> 'Leaf_ (Slot i su cs q)) = ()
 
-  OKPath (      old 
-             :> 'Leaf_ (Slot i su cs q)
-             :> 'Down_ cs
-             :> 'Branch_ (l ':= Slot i' su' cs' q' )
-             :> 'Leaf_ (Slot i' su' cs' q')) = OKPath old 
+
+
+-- | Lets us write PathFinders left-to-right. (It gets tricky doing them right to left...)
+(+>) :: PathFinder start old -> (PathFinder start old -> PathFinder start new) -> PathFinder start new 
+a +> b = b a 
+infixl 1 +>
+
 
 (/>) :: NormalizedPath  old -> (NormalizedPath old -> NormalizedPath new) -> NormalizedPath  new 
 a /> f = f a 
 infixl 1 />
-
-(+>) :: PathFinder start old -> (PathFinder start old -> PathFinder start new) -> PathFinder start new 
-a +> b = b a 
-infixl 1 +>
 
 normalizePF :: forall path. PathFinder' path -> NormalizedPath path 
 normalizePF = \case 
@@ -788,28 +668,9 @@ instance (HasType l t rs,KnownSymbol l) => HasType_ t rs l
 
 type HasTypeQ slot cs = DC.ForallV (HasType_ slot cs)
 
-data NormalizedPath :: PathDir -> Type where 
-  Start' :: forall l i q su cs
-          . ( Ord i) 
-           =>  NormalizedPath ('Begin :> 'Leaf_ (Slot i su cs q))
-
-  Branch' :: forall l i q su cs slots old root 
-         . ( KnownSymbol l
-           , HasType l (Slot i su cs q) slots
-           , Ord i) 
-        => SlotKey l slots (Slot i su cs q) 
-        -> NormalizedPath  (old :> 'Down_ slots) 
-        -> NormalizedPath  ((old :> 'Down_ slots) :> 'Branch_ (l ':= Slot i su cs q))
-
-  Leaf' :: forall q i su cs l slots old root 
-        . Ord i
-       => i
-       -> NormalizedPath  (old :> 'Branch_ (l ':= Slot i su cs q))
-       -> NormalizedPath  ((old :> 'Branch_ (l ':= Slot i su cs q)) :> 'Leaf_ (Slot i su cs q))
-
-  Down' :: forall i su cs q old root 
-         . NormalizedPath (old :> 'Leaf_ (Slot i su cs q))
-        -> NormalizedPath (old :> 'Leaf_ (Slot i su cs q) :> 'Down_ cs)
 
 
-
+-- this will give us orphan instances if here (I think? Maybe not because we're declaring instances for the kind indexes)
+-- but we need it as a superclass constraint on extendPath to help the type inference 
+class RootOf p ~ slot => Locate (slot :: SlotData) (p :: PathDir) where 
+  locate :: NormalizedPath  p -> Entity slot -> STM (Maybe (TraceE p))

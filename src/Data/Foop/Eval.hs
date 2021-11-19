@@ -17,26 +17,11 @@ import Control.Comonad.Store
 import Control.Concurrent.STM
 import Data.Maybe
 import Data.Kind (Type)
-import Data.Functor.Constant
-import Data.Row.Internal
-import Data.Data
-import Control.Monad.Identity
-import Data.Constraint
+
 import GHC.TypeLits (Symbol)
 import qualified Data.Constraint.Forall as DC
-import Data.Constraint.Unsafe
-import Data.Bifunctor
-import Data.Row.Dictionaries
-import Data.Functor.Yoneda
-import Data.Functor.Compose
-import Data.Default
-import Control.Lens (over, set, view)
-import GHC.IO (unsafePerformIO)
-import Control.Lens.Getter
-import Control.Lens.Fold
-import Data.Foop.Dictionary
 import Data.Foop.Slot
-import Unsafe.Coerce
+
 import Data.Functor 
 
 
@@ -127,7 +112,7 @@ mkEntity_ e@EvalState{..} = store go (ExEvalState e)
   where
     go :: ExEvalState root loc surface slots query 
        -> Transformer root loc surface slots query
-    go ex@(ExEvalState est@(EvalState entity@(MkSpec iState (QHandler hQuery) rendr proxy) sta str su loc env)) 
+    go ex@(ExEvalState est@(EvalState entity@(MkSpec iState (Handler hQuery) rendr proxy) sta str su loc env)) 
       = Transformer $ \qx -> 
           case apNT (extract hQuery) (Q . liftCoyoneda $ qx)  of 
             EntityM m -> do  
@@ -246,20 +231,6 @@ requestAll q = do
 mkRequest :: Request q x -> q x
 mkRequest q = q id
 
-apNTWithContext = undefined 
-{--
-apNTWithContext :: forall query surface slots state c x 
-               . DC.Forall c 
-              => TBoxedContext c 
-              -> QHandler query c slots state  
-              -> AlgebraQ query x 
-              -> EntityM c slots state query IO x 
-apNTWithContext box handler qx = unboxContext box go
-  where 
-    go :: forall (cxt :: SlotData). Dict (c cxt) -> TVar (RenderLeaf cxt) -> EntityM c slots state query IO x
-    go d@Dict tv = case instHandler @cxt handler of 
-      nt -> apNT nt qx 
---}
 evalF :: forall  slots surface state query root deps a
     .  EvalState root deps slots surface state query
     -> EntityF deps slots state query IO a
@@ -272,7 +243,7 @@ evalF eState@EvalState{..} = \case
         ST.modify' $ \_ -> ExEvalState $ EvalState {_state = newState,..}
         pure a
 
-  Observe _ _ -> undefined 
+--  Observe _ _ -> undefined 
 
   Interact _ _ -> undefined 
 
@@ -284,14 +255,14 @@ evalF eState@EvalState{..} = \case
       pure $ withDict d (leaf ^. g)
 --}
   Query q -> case _entity of 
-    MkSpec iState (QHandler hQuery) renderR proxy   -> 
+    MkSpec iState (Handler hQuery) renderR proxy   -> 
       case apNT (extract hQuery) (Q q) of
         EntityM ef -> foldF (evalF (EvalState {..})) ef
 
   GetSlot slot f ->  pure . f $ lookupStorage slot _storage
 
   -- GHC doesn't get as mad if we do line-by-line "imperative style" vs trying to compose everything together
-  Create slot i e' a -> case slot of
+  Create slot l i e' a -> case slot of
     SlotKey -> undefined {-- 
                 do
       e <- liftIO $ new_ (_location ) _environment e' 
@@ -328,16 +299,21 @@ delete i = EntityM . liftF $ Delete (SlotKey :: SlotKey label slots '(i,su,Rende
 -- 
 --   Requires a type application for the label.
 
-create :: forall l i cs su q deps slot state query slots  ds. (Ord i, Forall slots SlotOrdC, Forall cs SlotOrdC,
- KnownSymbol l, HasType l (Slot i su cs q) slots) =>
-  i
-  -> Model  ds (Slot i su cs q)
-  -> EntityM deps slots state query IO ()
-create i p = EntityM . liftF $ Create (SlotKey @l )   i p ()
+create :: forall l i cs su q deps slot state query slots  ds
+        . (Ord i
+        , Forall slots SlotOrdC, Forall cs SlotOrdC
+        , KnownSymbol l
+        , HasType l (Slot i su cs q) slots) 
+       => i
+       -> Model  ds (Slot i su cs q)
+       -> EntityM deps slots state query IO ()
+create  i p = EntityM . liftF $ Create (SlotKey @l ) Label i p ()
 
+{--
 observe_ :: forall l m deps a slots state query path 
           . (Functor m, KnownSymbol l, HasType l (PathFinder 'Begin path) deps) 
          => Label l
-         -> (TraceS path -> a) 
+         -> (RenderLeaf (EndOf path) -> a) 
          -> EntityM deps slots state query m a
 observe_ path f = EntityM . liftF $ Observe path f 
+--}

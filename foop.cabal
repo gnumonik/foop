@@ -33,6 +33,8 @@ library
       Data.Foop.Dictionary
       Data.Foop.Slot 
       Data.Foop.Example 
+      Data.Foop.Exists
+      Data.Foop.Paths
 
   other-modules:
       Paths_foop
@@ -50,9 +52,8 @@ library
     , constraints
     , containers
     , data-default
-    , lens 
-    , zippers
-    , singletons
+
+
 
   default-language: Haskell2010
 

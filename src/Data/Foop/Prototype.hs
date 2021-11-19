@@ -53,12 +53,16 @@ queryHandler :: forall query slots state deps
        -> AlgebraQ query :~> EntityM deps slots state query IO 
 queryHandler eval = NT $ \(Q q) -> unCoyoneda (\g -> fmap g . eval) q 
 
+mkQHandler_ :: forall slot query slots state 
+             . (forall x. query x -> EntityM  Empty slots state query IO x)
+             -> Handler slot query Empty slots state
+mkQHandler_ f = mkQHandler NoDeps (const f)   
 
 mkQHandler :: forall slot query deps  slots state  
             . MkPaths slot deps 
            -> (forall x. MkPaths slot deps -> query x -> EntityM  deps slots state query IO x)
-           -> QHandler slot query deps slots state 
-mkQHandler paths eval = QHandler $ store (accessor eval) paths 
+           -> Handler slot query deps slots state 
+mkQHandler paths eval = Handler $ store (accessor eval) paths 
   where 
     accessor :: (forall x. MkPaths slot deps -> query x -> EntityM deps slots state query IO x)
              -> MkPaths slot deps
@@ -66,8 +70,8 @@ mkQHandler paths eval = QHandler $ store (accessor eval) paths
     accessor f' paths = NT $ \(Q q) -> unCoyoneda (\g -> fmap g . eval paths) q 
 
 unCoyoneda :: forall (q :: Type -> Type) 
-                      (a :: Type) 
-                      (r :: Type)
+                     (a :: Type) 
+                     (r :: Type)
             . (forall (b :: Type). (b -> a) -> q b -> r)
             -> Coyoneda q a 
             -> r 
