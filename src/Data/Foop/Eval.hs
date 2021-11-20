@@ -27,10 +27,6 @@ import Data.Functor
 
 
 
-unTContext :: forall c. TBoxedContext c -> STM (BoxedContext c)
-unTContext (TBoxedContext c) = readTVar c <&> BoxedContext
-
-
 
 -- | Extracts a label `l` from a `SlotKey l slots q i r`
 slotLabel :: forall l slots slot . SlotKey l slots slot -> Label l
@@ -47,8 +43,8 @@ withExEval (ExEvalState e) f = f e
 new_ :: forall index surface slots query context deps root 
         . ( Ord index
           , Forall slots SlotOrdC
-          ) => PathFinder' root 
-            -> TMVar (Entity (RootOf root))
+          ) => Segment' root 
+            -> TMVar (Entity (Source root))
             -> Model deps (Slot index surface slots query) 
             -> IO (Entity (Slot index surface slots query))
 new_ path tmv (Model spec@(MkSpec iState qHandler renderR slots )) = do 
@@ -67,20 +63,20 @@ new_' :: forall root surface slots query i state deps
         . ( Forall slots SlotOrdC
           , SlotConstraint slots
           )
-       => Spec deps state (Slot i surface slots query)  
+       => Spec deps state (Slot () surface slots query)  
        -> Rec (MkStorage slots) 
        -> surface 
-       -> RenderTree slots 
-       -> TVar (RenderLeaf (Slot () surface slots query)) 
-       -> IO (Entity '((),surface,RenderTree slots,query))
+     --  -> RenderTree slots 
+    --   -> TVar (RenderLeaf (Slot () surface slots query)) 
+       -> IO (Entity (Slot () surface slots query))
 new_' spec@MkSpec{..} storage surface tree cxt  =  do
     env :: TMVar (Entity (Slot () surface slots query)) <- newEmptyTMVarIO 
     let evalSt = EvalState {_entity      = spec 
                            ,_state       = initialState 
-                           ,_storage     = storage 
+                          -- ,_storage     = storage 
                            ,_surface     = surface 
-                           ,_location    = Here'
-                           ,_environment = env 
+                          -- ,_location    = Here'
+                          -- ,_environment = env 
                             }
     eStore <- newTVarIO $  mkEntity_ @() evalSt
     atomically $ putTMVar env (Entity eStore)
@@ -90,8 +86,8 @@ new_' spec@MkSpec{..} storage surface tree cxt  =  do
 -- | Initializes an EvalState given a Spec 
 initE :: forall slots surface st q deps  root i
        . ( SlotConstraint slots)
-      => PathFinder' root 
-      -> TMVar (Entity (RootOf root))
+      => Segment' root 
+      -> TMVar (Entity (Source root))
       -> Spec deps st (Slot i surface slots q)
       -> EvalState root deps slots surface st q 
 initE path tmv espec@MkSpec{..}
@@ -311,7 +307,7 @@ create  i p = EntityM . liftF $ Create (SlotKey @l ) Label i p ()
 
 {--
 observe_ :: forall l m deps a slots state query path 
-          . (Functor m, KnownSymbol l, HasType l (PathFinder 'Begin path) deps) 
+          . (Functor m, KnownSymbol l, HasType l (Segment 'Begin path) deps) 
          => Label l
          -> (RenderLeaf (EndOf path) -> a) 
          -> EntityM deps slots state query m a

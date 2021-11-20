@@ -5,6 +5,10 @@ module Data.Foop.Exists where
 
 import Data.Kind
 import Data.Constraint
+import Data.Row
+import Data.Row.Dictionaries
+import qualified Data.Row.Records as R
+import Data.Proxy
 
 -- (adapted from IsA in Data.Row.Dictionaries)
 -- HasA c f t == exists a. c a => f a 
@@ -75,3 +79,67 @@ discharge :: forall c f g t r
           -> (forall a. (f a ~ t,c a) => g a -> r)
           -> r 
 discharge  (Deriving f (Ex ft)) g = g (f ft)
+
+ 
+data Ex2 :: (k1 -> Constraint) -> (k2 -> Constraint) -> (k1 -> k2 -> Type) -> Type -> Type where 
+  Ex2 :: forall k1 k2  
+                (a  :: k1)
+                (b  :: k2)
+                (f  :: k1 -> k2 -> Type)
+                (c1 :: k1 -> Constraint)
+                (c2 :: k2 -> Constraint)
+                (t :: Type)
+       . (t ~ f a b, c1 a, c2 b) => f a b -> Ex2 c1 c2 f t  
+
+data Ex2W :: (k1 -> Constraint) -> (k2 -> Constraint) -> (k1 -> k2 -> Type) -> Type -> Type where 
+  Ex2W :: forall k1 k2  
+                (a  :: k1)
+                (b  :: k2)
+                (f  :: k1 -> k2 -> Type)
+                (c1 :: k1 -> Constraint)
+                (c2 :: k2 -> Constraint)
+                (t :: Type)
+       . (t ~ f a b, c1 a, c2 b) =>  Ex2W c1 c2 f t
+
+type Exists2 :: (k1 -> Constraint) -> (k2 -> Constraint) -> (k1 -> k2 -> Type) -> Type -> Constraint 
+class Exists2 c1 c2 f t where 
+  ex2 :: forall a b. (c1 a, c2 b, t ~ f a b) => f a b -> Ex2 c1 c2 f t 
+  ex2 = Ex2 
+
+  ex2W :: Ex2W c1 c2 f t 
+
+instance (c1 a, c2 b) => Exists2 c1 c2 f (f a b) where 
+  ex2W = Ex2W 
+
+allHave :: forall f c children 
+        . Forall children (Exists c f) 
+       => Rec children 
+       -> Rec (R.Map (Ex c f) children)
+allHave = R.map @(Exists c f) go 
+  where 
+    go :: forall t 
+        . Exists c f t 
+       => t 
+       -> Ex c f t 
+    go t = case exW :: ExW c f t of 
+      h@ExW -> Ex t 
+
+allTransform :: forall c f g h children 
+              . Forall children Unconstrained1 
+             => Rec (R.Map (Deriving c f g) children)
+             -> (forall x. c x => g x -> h x) 
+             -> Rec (R.Map (Deriving c f h) children)
+allTransform old f = R.transform' @children @(Deriving c f g) @(Deriving c f h) go old 
+  where 
+    go :: forall t. Deriving c f g t -> Deriving c f h t
+    go mx = mx -/-> f 
+
+allTo :: forall f g c children 
+       .  Forall children (Exists c f) 
+      => (forall a. c a => f a -> g a ) 
+      -> Rec (R.Map (Ex c f ) children)
+      -> Rec (R.Map (Deriving c f g) children)
+allTo f = R.transform @(Exists c f) @children @(Ex c f) @(Deriving c f g) go 
+  where 
+    go :: forall t. Exists c f t => Ex c f t -> Deriving c f g t 
+    go (Ex ft) = Deriving f (Ex ft)

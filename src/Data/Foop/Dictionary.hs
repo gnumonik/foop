@@ -1,17 +1,17 @@
 module Data.Foop.Dictionary where
 
-import Data.Foop.Types ( SlotKey(..), StorageBox, RenderBranch, SlotC, SlotOrdC, IndexOf )
+import Data.Foop.Types 
 import Data.Constraint ( Dict(..), mapDict, weaken1, withDict )
 import Data.Row ( HasType, type (.!) )
 import qualified Data.Row.Records as R
 import Data.Row.Dictionaries ( mapHas )
 
-deriveStoreHas :: forall label slots slot
+deriveHas :: forall f label slots slot
                 . SlotKey label slots slot
-               -> Dict (HasType label (StorageBox slot) (R.Map StorageBox slots))
-deriveStoreHas SlotKey
+               -> Dict (HasType label (f slot) (R.Map f slots))
+deriveHas SlotKey 
   = withDict
-    (mapDict weaken1 $ mapDict (mapHas @StorageBox @label @slot @slots) (Dict @((slots .! label) ~ slot)))
+    (mapDict weaken1 $ mapDict (mapHas @f @label @slot @slots) (Dict @((slots .! label) ~ slot)))
     Dict
 
 storeHas :: forall label slots slot
@@ -25,10 +25,12 @@ storeHas  = withDict
     (mapDict weaken1 $ mapDict (mapHas @StorageBox @label @slot @slots) (Dict @((slots .! label) ~ slot)))
     Dict
 
+{--
 deriveSurfaceHas :: forall label slots slot
-                  . SlotKey label slots slot
+                  . RootKey label slots slot
                  -> Dict (HasType label (RenderBranch slot) (R.Map RenderBranch slots))
-deriveSurfaceHas SlotKey
+deriveSurfaceHas RootKey
   = withDict
     (mapDict weaken1 $ mapDict (mapHas @RenderBranch @label @slot @slots) (Dict @((slots .! label) ~ slot)))
     Dict
+--}

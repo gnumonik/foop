@@ -48,25 +48,25 @@ mkSimpleRender f = MkRenderer f (const $ pure ())
 
 -- | `queryHandler` takes a function of type (forall x. query x -> EntityM slots state query m)
 --   and packages it into a boxed natural transformation. 
-queryHandler :: forall query slots state deps 
-        . (query ~> EntityM deps slots state query IO)
-       -> AlgebraQ query :~> EntityM deps slots state query IO 
+queryHandler :: forall query roots shoots state deps 
+        . (query ~> EntityM deps roots shoots state query IO)
+       -> AlgebraQ query :~> EntityM deps roots shoots state query IO 
 queryHandler eval = NT $ \(Q q) -> unCoyoneda (\g -> fmap g . eval) q 
 
-mkQHandler_ :: forall slot query slots state 
-             . (forall x. query x -> EntityM  Empty slots state query IO x)
-             -> Handler slot query Empty slots state
+mkQHandler_ :: forall slot query roots shoots state 
+             . (forall x. query x -> EntityM  Empty roots shoots state query IO x)
+             -> Handler slot query Empty roots shoots state
 mkQHandler_ f = mkQHandler NoDeps (const f)   
 
-mkQHandler :: forall slot query deps  slots state  
+mkQHandler :: forall slot query deps roots shoots state  
             . MkPaths slot deps 
-           -> (forall x. MkPaths slot deps -> query x -> EntityM  deps slots state query IO x)
-           -> Handler slot query deps slots state 
+           -> (forall x. MkPaths slot deps -> query x -> EntityM  deps roots shoots state query IO x)
+           -> Handler slot query deps roots shoots state 
 mkQHandler paths eval = Handler $ store (accessor eval) paths 
   where 
-    accessor :: (forall x. MkPaths slot deps -> query x -> EntityM deps slots state query IO x)
+    accessor :: (forall x. MkPaths slot deps -> query x -> EntityM deps roots shoots state query IO x)
              -> MkPaths slot deps
-             -> AlgebraQ query :~> EntityM deps slots state query IO
+             -> AlgebraQ query :~> EntityM deps roots shoots state query IO
     accessor f' paths = NT $ \(Q q) -> unCoyoneda (\g -> fmap g . eval paths) q 
 
 unCoyoneda :: forall (q :: Type -> Type) 
@@ -76,15 +76,4 @@ unCoyoneda :: forall (q :: Type -> Type)
             -> Coyoneda q a 
             -> r 
 unCoyoneda f (Coyoneda ba fb) = f ba fb  
-
-unboxContext :: forall c r. TBoxedContext c 
-             -> (forall cxt. Dict (c cxt) -> TVar (RenderLeaf cxt) -> r)
-             -> r 
-unboxContext (TBoxedContext cxt) f = f Dict cxt 
-
-
-unboxContext' :: forall (c :: SlotData -> Constraint) r. TBoxedContext c 
-             -> (forall i su cs q. Dict (c (Slot i su cs q)) -> TVar (RenderLeaf (Slot i su cs q)) -> r)
-             -> r 
-unboxContext' (TBoxedContext cxt) f = f Dict  cxt 
 

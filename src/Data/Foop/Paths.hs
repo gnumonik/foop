@@ -14,139 +14,98 @@ import Control.Concurrent.STM
 import Control.Monad
 import Data.Foop.Slot (lookupStorage)
 import Data.Foop.Exists
-
-data AnAtlasOf :: Row Type -> Type where 
-  AnAtlasOf :: Forall children (Exists (ExtendPath parent) (PathFinder 'Begin)) 
-            => Atlas parent children 
-            -> AnAtlasOf children 
+import Data.Foop.Dictionary 
 
 
-instance Locate root (old :> 'Down_ slots) => Locate root ((old :> 'Down_ slots) :> 'Branch_ (l ':= Slot i su cs q)) where 
-  locate (Branch' key@SlotKey old) e = locate old e >>= \case 
-    Nothing -> pure Nothing
-    Just (MkStorageTree b) -> pure . Just $ lookupStorage key b 
+mkENode :: Entity slot -> ENode slot 
+mkENode = undefined 
 
-instance  Locate (Slot i su cs q) ('Begin :> 'Leaf_ (Slot i su cs q) :> 'Down_ cs) where 
-  locate (Down' Start') (Entity e) = (pos <$> readTVar e) >>= \case
-    ExEvalState (EvalState _ _ storage _ _ _) -> pure . Just $ MkStorageTree storage 
+instance Locate ('Begin ':> 'Start (l ':= Slot i s rs q)) where 
+  locate Here' e = pure $ mkENode e 
 
-instance Locate root (old :> 'Branch_ (l ':= Slot i su cs q)) => Locate root (old :> 'Branch_ (l ':= Slot i su cs q) :> 'Leaf_ (Slot i su cs q)) where 
-  locate (Leaf' i old) e = locate old e >>= \case 
-    Nothing -> pure Nothing 
-    Just (MkStorageBox storage) -> pure $ M.lookup (Indexed Index i) storage 
+instance Locate ('Begin :> 'Start (_l ':= Slot i_ s_ rs' q_) :> 'Down (l ':= Slot i s rs q)) where 
+  locate (Child' key@SlotKey old) e = locate old e >>= \case 
+    (ENode _ (ETree roots) _) -> withDict (deriveHas @ENode key) $ pure $ roots R..! (Label @l)
 
-instance Locate root (old1 :> 'Leaf_ (Slot i su cs q)) => Locate root (old1 :> 'Leaf_ (Slot i su cs q) :> 'Down_ cs) where 
-  locate (Down' old) e = locate old e >>= \case 
-    Nothing -> pure Nothing 
-    Just (Entity e) -> readTVar e >>= \e' -> case pos e' of 
-      ExEvalState (EvalState _ _ storage _ _ _) -> pure . Just $ MkStorageTree storage 
+instance Locate (old :> 'Down  (_l ':= Slot i_ s_ rs' q_)) 
+      => Locate (old :> 'Down  (_l ':= Slot i_ s_ rs' q_)  :> 'Down (l ':= Slot i s rs q)) where 
+  locate (Child' key@SlotKey old) e = locate old e >>= \case 
+    (ENode _ (ETree roots) _) -> withDict (deriveHas @ENode key) $ pure $ roots R..! (Label @l)
 
-mkPointed :: forall parent child
-           . ( ExtendPath parent child )  
-          => PathFinder 'Begin parent 
-          -> PathFinder 'Begin child 
-          -> Pointed parent child 
-mkPointed parent child = MkPointed $ readTMVar >=> locate (normalizePF $ extendPath parent child) 
-
-allHave :: forall f c children 
-        . AllHave f c children
-       => Rec children 
-       -> Rec (R.Map (Ex c f) children)
-allHave = R.map @(Exists c f) go 
-  where 
-    go :: forall t 
-        . Exists c f t 
-       => t 
-       -> Ex c f t 
-    go t = case exW :: ExW c f t of 
-      h@ExW -> Ex t 
-
-allTransform :: forall c f g h children 
-              . Forall children Unconstrained1 
-             => Rec (R.Map (Deriving c f g) children)
-             -> (forall x. c x => g x -> h x) 
-             -> Rec (R.Map (Deriving c f h) children)
-allTransform old f = R.transform' @children @(Deriving c f g) @(Deriving c f h) go old 
-  where 
-    go :: forall t. Deriving c f g t -> Deriving c f h t
-    go mx = mx -/-> f 
-
-allTo :: forall f g c children 
-       .  Forall children (Exists c f) 
-      => (forall a. c a => f a -> g a ) 
-      -> Rec (R.Map (Ex c f ) children)
-      -> Rec (R.Map (Deriving c f g) children)
-allTo f = R.transform @(Exists c f) @children @(Ex c f) @(Deriving c f g) go 
-  where 
-    go :: forall t. Exists c f t => Ex c f t -> Deriving c f g t 
-    go (Ex ft) = Deriving f (Ex ft)
+mkNavigator :: forall source destination 
+             . Extends source destination 
+            => Segment 'Begin source 
+            -> Segment 'Begin destination 
+            -> Navigator source destination 
+mkNavigator src dst = MkNavigator $ \e ->  locate (extendPath src dst) e
 
 unifyPaths :: forall parent children 
-            . ( Forall children (Exists (ExtendPath parent) (PathFinder 'Begin)) )
-           => PathFinder 'Begin parent 
+            . ( Forall children (Exists (Extends parent) (Segment 'Begin)) )
+           => Segment 'Begin parent 
            -> Rec children 
-           -> Rec (R.Map (Deriving (ExtendPath parent) (PathFinder 'Begin) (Pointed parent)) children)
+           -> Rec (R.Map (Deriving (Extends parent) (Segment 'Begin) (Navigator parent)) children)
 unifyPaths pt rs = b
   where 
-    a :: Rec (R.Map (Ex (ExtendPath parent) (PathFinder 'Begin)) children)
+    a :: Rec (R.Map (Ex (Extends parent) (Segment 'Begin)) children)
     a = allHave 
-          @(PathFinder 'Begin) 
-          @(ExtendPath parent)  
+          @(Segment 'Begin) 
+          @(Extends parent)  
           rs 
 
-    b :: Rec (R.Map (Deriving (ExtendPath parent) (PathFinder 'Begin) (Pointed parent)) children)
+    b :: Rec (R.Map (Deriving (Extends parent) (Segment 'Begin) (Navigator parent)) children)
     b = allTo 
-          @(PathFinder 'Begin) 
-          @(Pointed parent) 
-          @(ExtendPath parent) 
+          @(Segment 'Begin) 
+          @(Navigator parent) 
+          @(Extends parent) 
           @children 
-          (mkPointed pt) a 
+          (mkNavigator pt) a 
 
 mkAtlas :: forall parent children root  
-         . ( Forall children (Exists (ExtendPath parent) (PathFinder 'Begin))) 
-        => Root parent 
-        -> PathFinder 'Begin parent 
+         . ( Forall children (Exists (Extends parent) (Segment 'Begin))) 
+        => TMVar (Entity (Source parent))
+        -> Segment 'Begin parent 
         -> Rec children 
         -> Atlas parent children 
-mkAtlas (MkRoot tmv) parentPath children = case unifyPaths parentPath children of 
+mkAtlas tmv parentPath children = case unifyPaths parentPath children of 
   unified -> go tmv unified 
  where 
    go :: forall root
-       . root ~ RootOf parent 
+       . root ~ Source parent 
       => TMVar (Entity root) 
       -> Unified parent children 
       -> Atlas parent children 
    go t u = MkAtlas t u 
 
-mkAnAtlasOf :: Forall children (Exists (ExtendPath parent) (PathFinder 'Begin)) 
-            => Root parent
-            -> PathFinder 'Begin parent -> Rec children -> AnAtlasOf children
+mkAnAtlasOf :: Forall children (Exists (Extends parent) (Segment 'Begin)) 
+            => TMVar (Entity (Source parent)) 
+            -> Segment 'Begin parent -> Rec children -> AnAtlasOf children
 mkAnAtlasOf root parent children = AnAtlasOf $ mkAtlas root parent children 
 
-
 withAtlas :: forall l children path
-           . ( HasType l (PathFinder 'Begin path) children
+           . ( HasType l (Segment 'Begin path) children
            , AllUniqueLabels children 
            , KnownSymbol l
            ) => AnAtlasOf children
-             -> STM (Maybe (TraceE path))
+             -> STM (ENode (Target path))
 withAtlas (AnAtlasOf atlas@(MkAtlas _ _)) = goA atlas 
   where 
     goA :: forall parent
         . Atlas parent children
-       -> STM (Maybe (TraceE path))
+       -> STM (ENode (Target path))
     goA (MkAtlas tmv unified) = readTMVar tmv >>= \e ->  goB e unified 
       where 
-        goB :: Entity (LeafMe (First parent))
-            -> Rec (R.Map (Deriving  (ExtendPath parent) (PathFinder 'Begin) (Pointed parent)) children)
-            -> STM (Maybe (TraceE path))
-        goB (Entity e) unified' -- logic time  
+        goB :: Entity (Source parent)
+            -> Rec (R.Map (Deriving  (Extends parent) (Segment 'Begin) (Navigator parent)) children)
+            -> STM (ENode (Target path))
+        goB e unified' -- logic time  
           = withDict myDict 
             $ case unified R..! (Label @l) of 
-                (mx@(Deriving f (Ex ft)) :: (Deriving  (ExtendPath parent) (PathFinder 'Begin) (Pointed parent)) (PathFinder 'Begin path))
-                  -> discharge mx $ \(MkPointed g) -> g tmv
+                (mx@(Deriving f (Ex ft)) :: (Deriving  (Extends parent) (Segment 'Begin) (Navigator parent)) (Segment 'Begin path))
+                  -> discharge mx $ \(MkNavigator g) -> g e
          where 
-          myDict = mapHas @(Deriving  (ExtendPath parent) (PathFinder 'Begin) (Pointed parent))
+          myDict = mapHas @(Deriving  (Extends parent) (Segment 'Begin) (Navigator parent))
                              @l 
-                             @(PathFinder 'Begin path)
+                             @(Segment 'Begin path)
                              @children
+
+--}
