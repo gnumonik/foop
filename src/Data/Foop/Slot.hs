@@ -31,9 +31,11 @@ import Data.Row.Internal
       Empty,
       Forall,
       Label(Label),
-      Row )
+      Row(..), 
+      LT(..) )
 import GHC.TypeLits (Symbol, TypeError)
 import Data.Row.Dictionaries (mapHas)
+import Data.Foop.Exists 
 
 -- | Given an Entity, renders its surface. Doesn't run the IO action.
 {--
@@ -109,6 +111,18 @@ mkStorage :: (AllUniqueLabels slots, AllUniqueLabels (R.Map Proxy slots),
  Forall slots SlotOrdC, Forall (R.Map Proxy slots) Default) =>
  Proxy slots -> Rec (R.Map StorageBox slots)
 mkStorage proxy = toStorage proxy $ mkProxy  proxy
+
+
+projProxy :: Proxy (slot :: SlotData) -> Proxy (ReadLabels (Projections slot))
+projProxy Proxy = Proxy 
+
+
+
+
+
+
+
+hmwmbm = projProxy (Proxy @MySlot)
 
 type MySlot = Slot Bool Bool Row1 Maybe 
 

@@ -29,6 +29,7 @@ import Data.Row.Dictionaries (IsA(..),As(..),ActsOn(..),As'(..), Unconstrained1)
 import Data.Type.Equality (type (:~:)(Refl))
 import Data.Foop.Exists 
 
+
 --- *** Finish fixing paths so start doesn't have a label (this gives us an isomorphism between paths and well-formed slotdata)
 --- *** Write the isomorphism function(s)
 --- roots and shoots can both have upward constraints but they only need to be satisfied 
@@ -108,7 +109,7 @@ data EntityF deps roots shoots state query m a where
   Create   :: SlotKey l shoots (Slot i su rs q)
            -> Label l 
            -> i
-           -> Model ds (Slot i su rs q)
+           -> Model _loc ds (Slot i su rs q)
            -> a 
            -> EntityF deps roots shoots state query m a
 
@@ -151,11 +152,7 @@ instance  MonadIO m => MonadIO (EntityM deps roots shoots s q m) where
 instance MonadTrans (EntityM deps roots shoots s q ) where
   lift = EntityM . liftF . Lift
 
-data Model :: Row Type  -> SlotData -> Type where 
-  Model :: forall surface roots shoots query state deps i
-         . (SlotConstraint roots)
-        => Spec deps shoots state (Slot i surface roots query)
-        -> Model deps (Slot i surface roots query)
+
 
 -- use the fancy exists constraints if type inference doesn't work here 
 data ETree :: Row SlotData -> Type where 
@@ -208,7 +205,7 @@ instance Forall ks c => All c ks
 
 -- lol @ this
 type AllCompatibleModels parent models 
-  = Forall models (Exists2 (All (Exists (Extends parent) (Segment 'Begin))) Unconstrained1 Model)
+  = Forall models (Exists3 Unconstrained1 (All (Exists (Extends parent) (Segment 'Begin))) Unconstrained1 Model)
 
 data Shoots :: Row SlotData -> Type where 
   MkShoots :: forall shoots 
@@ -219,6 +216,19 @@ data Roots :: Path -> Row Type -> Type where
            . AllCompatibleModels parent roots 
           => Rec roots 
           -> Roots parent roots 
+
+data Model :: Path -> Row Type  -> SlotData -> Type where 
+  Model :: forall surface roots shoots query state deps i loc 
+         . (SlotConstraint roots)
+        => Spec loc deps shoots state (Slot i surface roots query)
+        -> Model loc deps (Slot i surface roots query)
+
+type family UnModel (models :: Row Type) :: (Row SlotData) where
+  UnModel  (R lts) = R (UnModelR lts) 
+
+type family UnModelR (models :: [LT Type]) :: [LT SlotData] where 
+  UnModelR '[] = '[]
+  UnModelR (l ':-> Model _loc deps slot ': rest) = (l ':-> slot ': UnModelR rest)
          
 -- going to have to "lift" the constraints somehow 
 -- all roots and shoots have to be compatible with whatever the path 
@@ -227,15 +237,20 @@ data Roots :: Path -> Row Type -> Type where
 -- can't do so now. bleh)
 
 -- | A `Spec` is the GADT from which an Entity is constructed. 
-type Spec ::  Row Type -> Row SlotData -> Type -> SlotData -> Type 
-data Spec deps shoots state slot where
-  MkSpec :: forall state query deps surface roots shoots i.
-   ( WellBehaved roots) => 
+type Spec :: Path -> Row Type -> Row SlotData -> Type -> SlotData -> Type 
+data Spec loc deps shoots state slot where
+  MkSpec :: forall state query deps surface rootsM roots shoots i loc.
+   ( WellBehaved roots
+   , roots ~ UnModel rootsM 
+   , Extends loc ('Begin :> 'Start (Slot i surface roots query)) 
+   , AllCompatibleModels (Extension loc ('Begin :> 'Start (Slot i surface roots query))) rootsM
+   )=> 
     { initialState   :: state 
-    , handleQuery    :: Handler (Slot i surface roots query) query deps roots shoots state  -- AlgebraQ query :~> EntityM deps slots state query IO 
+    , handleQuery    :: Handler (Slot i surface roots query) query deps roots shoots state
     , renderer       :: Renderer state surface 
-    , slots          :: Proxy roots 
-    } -> Spec deps shoots state (Slot i surface roots query)
+    , shoots         :: Proxy shoots 
+    , roots          :: Rec rootsM
+    } -> Spec loc deps shoots state (Slot i surface roots query)
 
 -- | `AlgebraQ query a` is a wrapper around a type which records a query algebra. 
 --   
@@ -245,16 +260,16 @@ newtype AlgebraQ query a =  Q (Coyoneda query a)
 -- | Evaluation State. Holds the Prototype Spec, the Prototype's State, 
 --   and a Context which can be read from inside the Prototype monad 
 type EvalState :: Row Type -> Row SlotData -> Row SlotData -> Type -> Type -> (Type -> Type) -> Type
-data EvalState   deps roots shoots surface st q where 
+data EvalState    deps roots shoots surface st q where 
   EvalState :: (SlotConstraint roots) => {
-      _entity      :: Spec deps shoots st (Slot i surface roots q)
+      _entity      :: Spec loc deps shoots st (Slot i surface roots q)
     , _state       :: st
     , _shoots      :: EBranch shoots 
     , _roots       :: ETree roots
     , _surface     :: surface 
-    -- , _environment :: AnAtlasOf deps
+    , _environment :: AnAtlasOf deps
     } -> EvalState  deps roots shoots surface st q 
-
+ 
 -- | Existential wrapper over the EvalState record. 
 data ExEvalState :: Row Type -> Row SlotData -> Row SlotData -> Type -> (Type -> Type) -> Type where
   ExEvalState :: ( SlotConstraint slots) 
@@ -265,9 +280,9 @@ data ExEvalState :: Row Type -> Row SlotData -> Row SlotData -> Type -> (Type ->
 --  
 --   This mainly serves to make reasoning about the EntityStore comonad less painful, and to 
 --   signficantly improve the readability of type 
-data Transformer root loc surface slots query where 
+data Transformer deps roots shoots surface query  where 
    Transformer :: 
-     (forall x. query x -> IO (x,ExEvalState root loc surface slots query)) -> Transformer root loc surface slots query 
+     (forall x. query x -> IO (x,ExEvalState deps roots shoots surface query  )) -> Transformer deps roots shoots surface query  
 
 -- | `EntityStore surface query` == `Store (ExEvalState surface query) (Transformer surface query)`
 -- 
@@ -302,9 +317,6 @@ type Tell query = () -> query ()
 type Request query a = (a -> a) -> query a 
 
 -- don't export the constructor 
--- | `Object surface query` == `Object (Entity surface query)`
---
---   This is a wrapper for a "root" Entity (i.e an Entity which is not the child of any other)
 type Object :: SlotData -> Type
 data Object slot where 
    Object :: Entity (Slot () su rs q) -> Object (Slot () su rs q) 
@@ -407,31 +419,39 @@ data Segment :: Path -> Path -> Type where
        -> Segment start (old :> Down new)
 
 data Segment' :: Path -> Type where 
-  Here' :: forall l i su rs ss q 
-        . KnownSymbol l 
-       => Segment' ('Begin :> 'Start (Slot i su rs q))
+  Here' :: forall i su rs ss q 
+        .  Segment' ('Begin :> 'Start (Slot i su rs q))
 
-  Child' :: forall l l' i su rs ss q i' su' rs' ss' q' old k (f :: (Symbol := SlotData) -> Dir (Symbol := SlotData))
+  ChildA' :: forall l l' i su rs ss q i' su' rs' ss' q' old 
          . ( KnownSymbol l'
          ,   HasType l' (Slot i' su' rs' q') rs 
          ) => SlotKey l' rs (Slot i' su' rs' q')  
-           -> Segment' (old :> f (l ':= Slot i su rs q))
-           -> Segment' (old :> f (l ':= Slot i su rs q) :> Down (l' ':= Slot i' su' rs' q'))
+           -> Segment' ('Begin :> Start (Slot i su rs q))
+           -> Segment' ('Begin :> Start (Slot i su rs q) :> Down (l' ':= Slot i' su' rs' q'))
+
+
+  ChildB' :: forall l l' i su rs ss q i' su' rs' ss' q' old 
+         . ( KnownSymbol l'
+         ,   HasType l' (Slot i' su' rs' q') rs 
+         ) => SlotKey l' rs (Slot i' su' rs' q')  
+           -> Segment' (old :> 'Down (l ':= Slot i su rs q))
+           -> Segment' (old :> 'Down (l ':= Slot i su rs q) :> Down (l' ':= Slot i' su' rs' q'))
 
 class Locate (path :: Path) where 
   locate :: Segment' path -> Entity (Source path) -> STM (ENode (Target path))
 
 -- | Appends two paths 
 type family Connect (parent :: Path) (child :: Path) :: Path where 
-  Connect old ('Begin :> 'Start new) = old :> 'Down new  
+  Connect (old :> 'Down (l ':= new)) ('Begin :> 'Start new) = old :> 'Down (l ':= new)
+--  Connect ('Begin :> 'Start new) ('Begin :> 'Start new) = 'Begin :> 'Start new
   Connect old (new :> Down (l ':= slot ))  = Connect old new :> Down (l ':= slot )
   Connect old (new :> Up (l ':= slot ))    = Connect old new :> Up (l ':= slot )
 
 class Connects (parent :: Path) (child :: Path) where 
   connect :: Segment 'Begin parent -> Segment 'Begin child -> Segment 'Begin (Connect parent child)
 
-instance Connects (old :> new :> Down (l ':= slot)) ('Begin ':> Start x) where 
-  connect old Here = Child old 
+instance Connects (old :>  Down (l ':= slot)) ('Begin ':> Start slot) where 
+  connect old new = old
 
 instance Connects old new  => Connects old (new :> Down (l ':= slot )) where 
   connect old (Child rest) = Child $ connect old rest 
@@ -440,45 +460,46 @@ instance Connects old new  => Connects old (new :> Up (l ':= slot )) where
   connect old (Parent rest) = Parent $ connect old rest 
 
 type family Normalize (path :: Path) :: Path where 
+  -- A 
   Normalize 'Begin = 'Begin 
 
+  -- B 
   Normalize ('Begin :> 'Start new) 
     = ('Begin :> 'Start new)
 
-  Normalize (old :> Down (l ':= Slot i su rs q)) 
-    =  Normalize old :> Down (l ':= Slot i su rs q)
+  -- C 
+  Normalize ('Begin :> 'Start (Slot i' su' rs' q') :> Down (l ':= any)) 
+    =  'Begin :> 'Start (Slot i' su' rs' q') :> Down (l ':= (rs' .! l))
 
-  Normalize (old :> f (l ':= Slot i su rs q) :> doesn't_Matter :> Up (l ':= Slot i su rs q)) 
-    =  Normalize (old :> f (l ':= Slot i su rs q))
+  -- D 
+  Normalize (old :> 'Down (l' ':= Slot i' su' rs' q') :> Down (l ':= any))
+    =  Normalize (old :> 'Down (l' ':= Slot i' su' rs' q')) :> Down (l ':= (rs' .! l))
+
+  -- E 
+  Normalize ('Begin :> 'Start (Slot i su rs q) :> 'Down _whatever_ :> Up (l ':= Slot i su rs q)) 
+    =  Normalize ('Begin :> 'Start (Slot i su rs q))
+
+  -- F
+  Normalize (old :> 'Down (l ':= Slot i su rs q) :> 'Down doesn't_Matter :> Up (l ':= Slot i su rs q)) 
+    =  Normalize (old :> 'Down (l ':= Slot i su rs q))
+
+  -- G
+  Normalize (old :> 'Down (l ':= Slot i su rs q) :> Up up1 :> Up up2)  
+    =  Normalize old 
+
 
 type CanNormalize path = ( Source path ~ Source (Normalize path)
                          , Target path ~ Target (Normalize path)) 
 
-class CanNormalize path => Normalizes (path :: Path) where 
+class Target path ~ Target (Normalize path) => 
+  Normalizes (path :: Path) where 
         normalize :: Segment 'Begin path -> Segment' (Normalize path)
 
-instance KnownSymbol l => Normalizes ('Begin :> 'Start (Slot i su rs q)) where
+-- A/B
+instance Normalizes ('Begin :> 'Start (Slot i su rs q)) where
   normalize Here = Here'
 
-instance ( Normalizes (old :> f (l ':= Slot i su rs q)) 
-         , CanNormalize (old :> f (l ':= Slot i su rs q) :> _anything_ :> Up (l ':= Slot i su rs q)) 
-         , Normalize (old ':> f (l ':= Slot i su rs q)) ~ (Normalize old ':> f (l ':= Slot i su rs q)))
-        => Normalizes (old :> f (l ':= Slot i su rs q) :> _anything_ :>  Up (l ':= Slot i su rs q)) where 
-  normalize (Parent old) = case old of 
-    Parent rest -> normalize rest 
-    Child rest -> normalize rest  
-
-
-instance ( KnownSymbol l' 
-         , Normalizes (old :> Down (l ':= Slot i su rs q))
-         , HasType l' (Slot i' su' rs' q') rs 
-         , Ord i'
-         , Forall rs SlotOrdC 
-         , Forall rs' SlotOrdC 
-         )
-       => Normalizes (old :> Down (l ':= Slot i su rs q) :> 'Down (l' ':= Slot i' su' rs' q')) where 
-            normalize (Child old) = Child' SlotKey (normalize old)
-
+-- C 
 instance ( KnownSymbol l' 
          , Normalizes ('Begin :> Start (Slot i su rs q))
          , HasType l' (Slot i' su' rs' q') rs 
@@ -486,45 +507,98 @@ instance ( KnownSymbol l'
          , Forall rs SlotOrdC 
          , Forall rs' SlotOrdC 
          )
-       => Normalizes ('Begin :> Start (l ':= Slot i su rs q) :> 'Down (l' ':= Slot i' su' rs' q')) where 
-            normalize (Child old) = Child' SlotKey (normalize old)
+       => Normalizes ('Begin :> Start (Slot i su rs q) :> 'Down (l' ':= Slot i' su' rs' q')) where 
+            normalize (Child old) = ChildA' SlotKey (normalize old)
+
+-- D 
+instance ( KnownSymbol l' 
+         , Normalizes (old :> Down (l ':= Slot i su rs q))
+         , Normalize(old :> Down (l ':= Slot i su rs q)) ~ (Normalize old :> Down (l ':= Slot i su rs q))
+         , HasType l' (Slot a b c d) rs 
+         , Ord a
+         , Forall rs SlotOrdC 
+         , Forall c SlotOrdC 
+         )
+       => Normalizes (old :> Down (l ':= Slot i su rs q) :> 'Down (l' ':= (Slot a b c d))) where 
+            normalize (Child old) = ChildB' SlotKey $ normalize old
+
+-- E (start down up)
+instance ( Normalizes ('Begin :> 'Start (Slot i su rs q)) 
+      --   , CanNormalize ('Begin :> 'Start (Slot i su rs q) :> _anything_ :> Up (l ':= Slot i su rs q))
+          )
+        => Normalizes ('Begin :> 'Start (Slot i su rs q) :> 'Down _anything_ :>  Up (l ':= Slot i su rs q)) where 
+  normalize (Parent old) = case old of 
+    Child rest -> normalize rest  
+
+-- F (old down up)
+instance ( Normalizes (old :> 'Down (l ':= Slot i su rs q)) 
+      --   , CanNormalize (old :> 'Down (l ':= Slot i su rs q) :> 'Down _whatever_ :> Up (l ':= Slot i su rs q))
+          )
+        => Normalizes (old :> 'Down (l ':= Slot i su rs q) :> 'Down _whatever_ :>  Up (l ':= Slot i su rs q)) where 
+  normalize (Parent old) = case old of 
+    Child rest -> normalize rest  
+
+-- G (old down up up)
+
+instance (Normalizes old
+        , Target old ~ Target (Normalize old)
+        , Target (((old ':> 'Down (l ':= Slot i su rs q)) ':> 'Up up1) ':> 'Up up2)  ~ Target (Normalize old)
+        ) => Normalizes (old :> 'Down (l ':= Slot i su rs q) :> Up up1 :> Up up2) where 
+          normalize (Parent (Parent (Child old))) = normalize old 
+
 
 class Normalizes p => Charted (p :: Path) where 
   chart :: Segment' (Normalize p) 
 
-instance KnownSymbol l => Charted ('Begin :> 'Start (l ':= Slot i su rs q)) where 
-  chart = Here'
+-- A/B 
+instance  Charted ('Begin :> 'Start (Slot i su rs q)) where 
+  chart = Here' 
 
-instance ( Charted (old :> Down (l ':= Slot i su rs q) ))
-      => Charted (old :> Down (l ':= Slot i su rs q) :> whocares :> Up (l ':= Slot i su rs q)) where 
-        chart = chart @(old :> Down (l ':= Slot i su rs q) )
-
-instance ( Charted ('Begin :> Start (l ':= Slot i su rs q) )
-         , Normalize ('Begin :> Start (l ':= Slot i su rs q)) ~ ('Begin :> Start (l ':= Slot i su rs q))
-         )
-      => Charted ('Begin :> Start (l ':= Slot i su rs q) :> whocares :> Up (l ':= Slot i su rs q)) where 
-        chart = chart @('Begin :> 'Start (l ':= Slot i su rs q) )
-
+-- C (start down)
 instance ( KnownSymbol l 
          , KnownSymbol l' 
-         , Charted ('Begin :> Start (l ':= Slot i su rs q))
+         , Charted ('Begin :> Start (Slot i su rs q))
          , HasType l' (Slot i' su' rs' q') rs 
          , Ord i'
          , Forall rs SlotOrdC 
          , Forall rs' SlotOrdC 
-         ) => Charted ('Begin :> Start (l ':= Slot i su rs q) :> 'Down (l' ':= Slot i' su' rs' q')) where 
-        chart = Child' SlotKey Here' 
+         ) => Charted ('Begin :> Start (Slot i su rs q) :> 'Down (l' ':= Slot i' su' rs' q')) where 
+        chart = ChildA' SlotKey Here' 
 
+-- D (old down down)
 instance ( KnownSymbol l' 
          , Charted (old :> Down (l ':= Slot i su rs q))
          , Normalizes (old :> Down (l ':= Slot i su rs q))
+         , Normalize (old :> Down (l ':= Slot i su rs q)) ~ (Normalize old :> Down (l ':= Slot i su rs q))
          , HasType l' (Slot i' su' rs' q') rs 
          , Ord i'
          , Forall rs SlotOrdC 
          , Forall rs' SlotOrdC 
          )
        => Charted (old :> Down (l ':= Slot i su rs q) :> 'Down (l' ':= Slot i' su' rs' q')) where 
-            chart = Child' SlotKey (chart @(old :> Down (l ':= Slot i su rs q)))
+            chart = ChildB' SlotKey (chart @(old :> Down (l ':= Slot i su rs q)))
+
+-- E (start down up)
+instance ( Charted ('Begin :> Start (Slot i su rs q) )
+         , Normalize ('Begin :> Start (Slot i su rs q)) ~ ('Begin :> Start (Slot i su rs q))
+         , Normalizes ('Begin :> Start (Slot i su rs q) :> 'Down whocares :> Up (l ':= Slot i su rs q))
+         )
+      => Charted ('Begin :> Start (Slot i su rs q) :> 'Down whocares :> Up (l ':= Slot i su rs q)) where 
+        chart = chart @('Begin :> 'Start (Slot i su rs q) )
+
+-- F (old down up)        
+instance ( Charted (old :> Down (l ':= Slot i su rs q) ))
+      => Charted (old :> Down (l ':= Slot i su rs q) :> 'Down _any :> Up (l ':= Slot i su rs q)) where 
+        chart = chart @(old :> Down (l ':= Slot i su rs q) )
+
+-- G (old down up up )
+instance ( Charted old 
+         , Normalizes old 
+         , Normalize old ~ Normalize (old :> Down _any1 :> 'Up up1 :> 'Up up2)
+         , Normalizes  (old :> Down _any1 :> 'Up up1 :> 'Up up2))
+      => Charted (old :> Down _any1 :> 'Up up1 :> 'Up up2) where 
+        chart = chart @old
+
 
 type Extension parent child = Normalize (Connect parent child)
 
@@ -572,7 +646,7 @@ infixl 1 :>
 deriving instance Show a => Show (Crumbs a) 
 
 type family Source (p :: Path) :: SlotData where 
-  Source ('Begin :> 'Start (l ':= a)) = a 
+  Source ('Begin :> 'Start a) = a 
   Source (a :> b)      = Source a 
 
 type family Last (p :: Path) :: Step where 
@@ -580,14 +654,79 @@ type family Last (p :: Path) :: Step where
 
 type family First (p :: Path) :: Step where 
   First ('Begin :> 'Start slot) = 'Start slot 
-  First (a :> b) = First a 
+  First (a :> b)                = First a 
 
 type family Target (p :: Path) :: SlotData where 
-  Target (a :> 'Start (l ':= b)) = b 
+  Target (a :> 'Start b)         = b 
   Target (a :> 'Down  (l ':= b)) = b 
   Target (a :> 'Up (l ':= b))    = b 
 
+type Slotify :: Path -> SlotData 
+type family Slotify p where 
+  Slotify ('Begin :> 'Start (Slot i su cs q)) = Slot i su cs q 
+  Slotify (a :> b :> c) = Slotify (a :> b)
 
--- 
+data Nat' = Z | S Nat' 
 
+data SNat :: Nat' -> Type where 
+  SZ :: SNat 'Z 
+  SS :: SNat x -> SNat ('S x)
+
+data Tagged b = Nat' :== b 
+
+type family (<>) (xs :: [k]) (ys :: [k]) :: [k] where 
+  '[] <> '[] = '[]
+  '[] <> ys  = ys 
+  xs  <> '[] = xs 
+  (x ': xs) <>  ys = x ': (xs <> ys) 
+
+type family ReadLabels (p :: [Path]) :: [LT Path] where 
+  ReadLabels '[] = '[]
+  ReadLabels (x ': xs) = ReadLabel x ': ReadLabels xs 
+
+type family ReadLabel (p :: Path) :: LT Path where 
+  ReadLabel (xs ':> Start slot) = "" ':-> (xs ':> Start slot) 
+  ReadLabel (xs ':> Down (l ':= slot)) = l ':-> (xs ':> Down (l ':= slot)) 
+
+type Projections :: SlotData -> [Path]
+type family Projections slot where 
+  Projections (Slot i su rs q) = ProjectionsR1 (Slot i su rs q) rs 
+
+type ProjectionsR1 :: SlotData -> Row SlotData -> [Path] 
+type family ProjectionsR1 slot slots where
+  ProjectionsR1 (Slot i su rs q) (R '[]) = '[]
+  ProjectionsR1 (Slot i su rs q) (R lts) = ProjectionsR2 (Slot i su rs q) lts 
+
+type ProjectionsR2 :: SlotData -> [LT SlotData] -> [Path ]
+type family ProjectionsR2 slot lts where 
+  ProjectionsR2 (Slot i su rs q) '[] = '[]
+
+  ProjectionsR2 (Slot i su rs q) (l ':-> newSlot ': rest) 
+    = ('Begin :> 'Start (Slot i su rs q) :> 'Down (l ':= newSlot)) 
+      ': (ConnectEmAll  ('Begin :> 'Start (Slot i su rs q) :> 'Down (l ':= newSlot)) 
+                     (Projections newSlot ) 
+      <> ProjectionsR2 (Slot i su rs q) rest )
+
+type family ConnectEmAll (p :: Path) (ps :: [Path]) :: [Path] where 
+  ConnectEmAll p '[] = '[] 
+  ConnectEmAll p (x ': xs) = Connect p x ': ConnectEmAll p xs 
+
+type family El (a :: k) (as :: [k]) :: Constraint where 
+  El a (a ': as) = () 
+  El a (x ': as) = El a as 
+
+type El :: k -> [k] -> Constraint 
+class El x xs => Elem x xs where 
+  elDict :: Dict (El x xs)
+  elDict = Dict 
+instance El x xs => Elem x xs 
+
+class Source path ~ slot => StartsAt slot path 
+instance Source path ~ slot => StartsAt slot path  
+
+class Each (StartsAt slot) paths => Anchored slot paths 
+instance Each (StartsAt slot) paths => Anchored slot paths 
+
+class (El p (Projections slot), Anchored slot (Projections slot)) => ProjectsTo p slot
+instance (El p (Projections slot), Anchored slot (Projections slot)) => ProjectsTo p slot 
 

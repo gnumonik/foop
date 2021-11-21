@@ -9,6 +9,88 @@ import Data.Row
 import Data.Row.Dictionaries
 import qualified Data.Row.Records as R
 import Data.Proxy
+import Data.Type.Equality (type (:~:) (Refl))
+import Data.Void 
+
+-- it's prettier than "Unconstrained1"
+type Top :: forall k. k -> Constraint 
+class Top k 
+instance Top k 
+
+
+-- we're gonna need lists bleh 
+-- most of this is taken/adapted from Data.SOP.Constraint 
+-- (which is a cool library with absolutely godawful names for everything)
+-- main difference is instead of a "fold" for the class method, 
+-- I'm just associating a dictionary w/ instances 
+
+type family
+  AllF (c :: k -> Constraint) (xs :: [k]) :: Constraint where
+  AllF _c '[]       = ()
+  AllF  c (x ': xs) = (c x, Each c xs)
+
+
+class (AllF c xs, Each Top xs) => Each (c :: k -> Constraint) (xs :: [k]) where
+  allDict :: forall t ts. xs :~: (t ': ts) -> (Dict ( c t), Dict (Each c ts))
+  allDict Refl = (Dict,Dict)  
+
+instance Each c '[]
+instance (c a, Each c as) => Each c (a ': as)
+
+-- not really similar to fmap
+type family FMap (f :: k -> Type) (xs :: [k]) :: [Type] where 
+  FMap f '[] = '[]
+  FMap f (x ': xs) = f x ': FMap f xs 
+
+emapEmpty :: forall xs ys f. (xs ~ '[], ys ~ FMap f xs) => ys :~: '[]
+emapEmpty = Refl 
+
+class Each (Exists Top f) xs => AllEx1 f xs 
+instance Each (Exists Top f) xs => AllEx1 f xs 
+
+--  for (g :: (k -> Type) -> [k] -> [Type] -> Type), (f :: k -> Type), (c :: k -> Constraint), (t :: Type)
+--  there exists some (xs :: [k]) such that (for every (x :: k) in (xs :: [k]), there exists some a such that tx ~ f a & c a)
+--    and 
+--  t ~ g f xs (FMap f xs)
+-- i think this actually does what i want but man it's unwieldy 
+data EachHas ::  ((k -> Type) -> [k] -> [Type] -> Type) -> (k -> Type) -> (k -> Constraint) -> Type -> Type where
+  EachHas    :: forall k 
+             (xs :: [k])
+             (c :: k -> Constraint) 
+             (f :: k -> Type)
+             (g :: (k -> Type) -> [k] -> [Type] -> Type)
+             (t :: Type)
+           . (Exists (Each (Exists c f)) (g f xs) t
+           , t ~ g f xs (FMap f xs) ) 
+           => g f xs (FMap f xs) -> EachHas g f c t 
+
+data FMapped :: (k -> Type) -> [k] -> [Type] -> Type where 
+  FMapped :: forall f ks ts. ts ~ FMap f ks => FMapped f ks ts 
+
+data EachHasW ::  ((k -> Type) -> [k] -> [Type] -> Type) -> (k -> Type) -> (k -> Constraint) -> Type -> Type where
+  EachHasW    :: forall k 
+             (xs :: [k])
+             (c :: k -> Constraint) 
+             (f :: k -> Type)
+             (g :: (k -> Type) -> [k] -> [Type] -> Type)
+             (t :: Type)
+           . (Exists (Each (Exists c f)) (g f xs) t
+           , t ~ g f xs (FMap f xs) ) => EachHasW g f c t  
+
+type EachHasC :: ((k -> Type) -> [k] -> [Type] -> Type) -> (k -> Type) -> (k -> Constraint) -> Type -> Constraint 
+class EachHasC g f c t where 
+  eachHasW :: forall xs.  EachHasW g f c t 
+
+instance ( Exists (Each (Exists c f)) (g f xs) (g f xs (FMap f xs))
+         , t ~ FMap f xs)
+        => EachHasC g f c (g f xs t) where 
+  eachHasW =  EachHasW :: EachHasW g f c (g f xs t)
+
+{-- 
+class Each (Exists c f) xs => AxEy xs f c where 
+  mapAll :: 
+--}
+
 
 -- (adapted from IsA in Data.Row.Dictionaries)
 -- HasA c f t == exists a. c a => f a 
@@ -110,6 +192,38 @@ class Exists2 c1 c2 f t where
 
 instance (c1 a, c2 b) => Exists2 c1 c2 f (f a b) where 
   ex2W = Ex2W 
+
+
+data Ex3 :: (k1 -> Constraint) -> (k2 -> Constraint) -> (k3 -> Constraint) -> (k1 -> k2 -> k3 -> Type) -> Type -> Type where 
+  Ex3 :: forall k1 k2 k3 
+                (a  :: k1)
+                (b  :: k2)
+                (c  :: k3)
+                (f  :: k1 -> k2 -> k3 -> Type)
+                (c1 :: k1 -> Constraint)
+                (c2 :: k2 -> Constraint)
+                (c3 :: k3 -> Constraint)
+                (t :: Type)
+       . (t ~ f a b c, c1 a, c2 b, c3 c) => f a b c -> Ex3 c1 c2 c3 f t  
+
+data Ex3W :: (k1 -> Constraint) -> (k2 -> Constraint) -> (k3 -> Constraint) -> (k1 -> k2 -> k3 -> Type) -> Type -> Type where 
+  Ex3W :: forall k1 k2 k3 
+                (a  :: k1)
+                (b  :: k2)
+                (c  :: k3)
+                (f  :: k1 -> k2 -> k3 -> Type)
+                (c1 :: k1 -> Constraint)
+                (c2 :: k2 -> Constraint)
+                (c3 :: k3 -> Constraint)
+                (t :: Type)
+       . (t ~ f a b c, c1 a, c2 b, c3 c) => Ex3W c1 c2 c3 f t  
+
+type Exists3 :: (k1 -> Constraint) -> (k2 -> Constraint) -> (k3 -> Constraint) -> (k1 -> k2 -> k3 -> Type) -> Type -> Constraint 
+class Exists3 c1 c2 c3 f t where 
+  ex3W :: Ex3W c1 c2 c3 f t 
+
+instance (c1 a, c2 b, c3 c) => Exists3 c1 c2 c3 f (f a b c) where 
+  ex3W = Ex3W 
 
 allHave :: forall f c children 
         . Forall children (Exists c f) 

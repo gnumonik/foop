@@ -17,19 +17,25 @@ import Data.Foop.Exists
 import Data.Foop.Dictionary 
 
 
+data RootOf :: Path -> Type where 
+  RootOf :: forall root parent  
+          . root ~ Source parent 
+         => TMVar (Entity root) 
+         -> RootOf parent
+
 mkENode :: Entity slot -> ENode slot 
 mkENode = undefined 
 
-instance Locate ('Begin ':> 'Start (l ':= Slot i s rs q)) where 
+instance Locate ('Begin ':> 'Start (Slot i s rs q)) where 
   locate Here' e = pure $ mkENode e 
 
-instance Locate ('Begin :> 'Start (_l ':= Slot i_ s_ rs' q_) :> 'Down (l ':= Slot i s rs q)) where 
-  locate (Child' key@SlotKey old) e = locate old e >>= \case 
+instance Locate ('Begin :> 'Start ( Slot i_ s_ rs' q_) :> 'Down (l ':= Slot i s rs q)) where 
+  locate (ChildA' key@SlotKey old) e = locate old e >>= \case 
     (ENode _ (ETree roots) _) -> withDict (deriveHas @ENode key) $ pure $ roots R..! (Label @l)
 
 instance Locate (old :> 'Down  (_l ':= Slot i_ s_ rs' q_)) 
       => Locate (old :> 'Down  (_l ':= Slot i_ s_ rs' q_)  :> 'Down (l ':= Slot i s rs q)) where 
-  locate (Child' key@SlotKey old) e = locate old e >>= \case 
+  locate (ChildB' key@SlotKey old) e = locate old e >>= \case 
     (ENode _ (ETree roots) _) -> withDict (deriveHas @ENode key) $ pure $ roots R..! (Label @l)
 
 mkNavigator :: forall source destination 
@@ -60,13 +66,24 @@ unifyPaths pt rs = b
           @children 
           (mkNavigator pt) a 
 
-mkAtlas :: forall parent children root  
+class Forall children (Exists (Extends parent) (Segment 'Begin))  
+    => AllExtend parent children where 
+      atlas :: RootOf parent
+            -> Segment 'Begin parent 
+            -> Rec children 
+            -> AnAtlasOf children
+      atlas = mkAnAtlasOf 
+
+instance Forall children (Exists (Extends parent) (Segment 'Begin))  
+    => AllExtend parent children 
+
+mkAtlas :: forall parent children   
          . ( Forall children (Exists (Extends parent) (Segment 'Begin))) 
-        => TMVar (Entity (Source parent))
+        => RootOf parent
         -> Segment 'Begin parent 
         -> Rec children 
         -> Atlas parent children 
-mkAtlas tmv parentPath children = case unifyPaths parentPath children of 
+mkAtlas (RootOf tmv) parentPath children = case unifyPaths parentPath children of 
   unified -> go tmv unified 
  where 
    go :: forall root
@@ -77,8 +94,10 @@ mkAtlas tmv parentPath children = case unifyPaths parentPath children of
    go t u = MkAtlas t u 
 
 mkAnAtlasOf :: Forall children (Exists (Extends parent) (Segment 'Begin)) 
-            => TMVar (Entity (Source parent)) 
-            -> Segment 'Begin parent -> Rec children -> AnAtlasOf children
+            => RootOf parent 
+            -> Segment 'Begin parent 
+            -> Rec children 
+            -> AnAtlasOf children
 mkAnAtlasOf root parent children = AnAtlasOf $ mkAtlas root parent children 
 
 withAtlas :: forall l children path
@@ -104,7 +123,7 @@ withAtlas (AnAtlasOf atlas@(MkAtlas _ _)) = goA atlas
                   -> discharge mx $ \(MkNavigator g) -> g e
          where 
           myDict = mapHas @(Deriving  (Extends parent) (Segment 'Begin) (Navigator parent))
-                             @l 
-                             @(Segment 'Begin path)
-                             @children
+                          @l 
+                          @(Segment 'Begin path)
+                          @children
 
