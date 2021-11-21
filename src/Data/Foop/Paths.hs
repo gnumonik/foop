@@ -93,7 +93,7 @@ withAtlas (AnAtlasOf atlas@(MkAtlas _ _)) = goA atlas
         . Atlas parent children
        -> STM (ENode (Target path))
     goA (MkAtlas tmv unified) = readTMVar tmv >>= \e ->  goB e unified 
-      where 
+      where  
         goB :: Entity (Source parent)
             -> Rec (R.Map (Deriving  (Extends parent) (Segment 'Begin) (Navigator parent)) children)
             -> STM (ENode (Target path))
@@ -108,4 +108,3 @@ withAtlas (AnAtlasOf atlas@(MkAtlas _ _)) = goA atlas
                              @(Segment 'Begin path)
                              @children
 
---}
