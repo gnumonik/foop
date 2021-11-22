@@ -153,30 +153,29 @@ type family T (lt :: Symbol := SlotData) :: SlotData where
   T (l ':= t) = t
  
 
-data HasCAt :: (k -> Constraint) -> Symbol -> Row k -> Type -> Type where 
-  HasCAt :: forall k (c :: k -> Constraint) (rk :: Row k) (l :: Symbol) t
+data HasCAt :: (k -> Constraint) -> Symbol -> Row k -> Type where 
+  HasCAt :: forall k (c :: k -> Constraint) (rk :: Row k) (l :: Symbol) 
           . ( WellBehaved rk 
             , KnownSymbol l 
             , HasType l (rk .! l) rk 
-            , c (rk .! l)
-            , Proxy (rk .! l) ~ t) => HasCAt c l rk t 
+            , c (rk .! l)) => HasCAt c l rk 
 
-class HasCAtC (c :: k -> Constraint) (l :: Symbol) (rk :: Row k) t where 
-  hasCAt :: HasCAt c l rk t 
+class HasCAtC (c :: k -> Constraint) (l :: Symbol) (rk :: Row k)  where 
+  hasCAt :: HasCAt c l rk 
 
 instance ( HasType l (rk .! l) rk
          , c (rk .! l) 
          , WellBehaved rk 
-         , KnownSymbol l 
-         , t ~ Proxy (rk .! l)) =>  HasCAtC c l rk t  where 
+         , KnownSymbol l ) =>  HasCAtC c l rk   where 
            hasCAt = HasCAt 
 
 type ARow = "pewps" .== Int 
          .+ "scewps" .== (Int -> Bool)
 
-testHas :: forall c l rk t. HasCAtC c l rk t => Proxy t 
+testHas :: forall c l rk. HasCAtC c l rk  => Proxy (rk .! l)
 testHas = Proxy 
 
+mop = testHas @Ord @"pewps" @ARow 
 
 
 class ( Forall (Project source) NormalChartedLocate 
