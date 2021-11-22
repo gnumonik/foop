@@ -12,9 +12,13 @@ import Data.Kind
 import Control.Comonad.Store
 import Control.Concurrent.STM 
 import Control.Monad
-import Data.Foop.Slot (lookupStorage)
+import Data.Foop.Slot 
 import Data.Foop.Exists
 import Data.Foop.Dictionary 
+import GHC.Base
+import Data.Proxy
+import Data.Default
+
 
 
 data RootOf :: Path -> Type where 
@@ -127,3 +131,89 @@ withAtlas (AnAtlasOf atlas@(MkAtlas _ _)) = goA atlas
                           @(Segment 'Begin path)
                           @children
 
+data PathFromTo :: SlotData -> SlotData -> Type where 
+  PathFromTo :: forall path slot source 
+                . ( Target path ~ slot 
+                  , Source path ~ source ) 
+               => Segment' path ->  PathFromTo source slot  
+
+newtype STMNode :: SlotData -> Type where 
+  STMNode :: STM (ENode slot) -> STMNode slot    
+
+class (Charted p, Normalized p, Locate p) => NormalChartedLocate p where 
+  normalCharted :: Dict (Charted p, Normalized p)
+  normalCharted = Dict 
+
+instance (Charted p, Normalized p, Locate p) => NormalChartedLocate p 
+
+type family L (lt :: Symbol := SlotData) :: Symbol where 
+  L (l ':= t) = l
+
+type family T (lt :: Symbol := SlotData) :: SlotData where 
+  T (l ':= t) = t
+ 
+
+data HasCAt :: (k -> Constraint) -> Symbol -> Row k -> Type -> Type where 
+  HasCAt :: forall k (c :: k -> Constraint) (rk :: Row k) (l :: Symbol) t
+          . ( WellBehaved rk 
+            , KnownSymbol l 
+            , HasType l (rk .! l) rk 
+            , c (rk .! l)
+            , Proxy (rk .! l) ~ t) => HasCAt c l rk t 
+
+class HasCAtC (c :: k -> Constraint) (l :: Symbol) (rk :: Row k) t where 
+  hasCAt :: HasCAt c l rk t 
+
+instance ( HasType l (rk .! l) rk
+         , c (rk .! l) 
+         , WellBehaved rk 
+         , KnownSymbol l 
+         , t ~ Proxy (rk .! l)) =>  HasCAtC c l rk t  where 
+           hasCAt = HasCAt 
+
+type ARow = "pewps" .== Int 
+         .+ "scewps" .== (Int -> Bool)
+
+testHas :: forall c l rk t. HasCAtC c l rk t => Proxy t 
+testHas = Proxy 
+
+
+
+class ( Forall (Project source) NormalChartedLocate 
+      , Forall (Project source) Locate 
+      , AllUniqueLabels (R.Map Proxy (Project source))
+      , AllUniqueLabels (Project source)
+      , KnownSymbol (L lt) 
+    --  , HasType (L lt) _hm (Project source)
+    --  , Fo 
+      , Forall (R.Map Proxy (Project source)) Default) => HasPathAt (source :: SlotData) (lt :: Symbol := SlotData) where 
+  pathify :: forall l slot (xs :: Path)
+           . ( lt ~ (l ':= slot)
+             , KnownSymbol l
+             , HasType l (xs :> 'Down (l ':= slot)) (Project source)
+             , ((Project source) .! l) ~ (xs :> 'Down (l ':= slot)) 
+             , Source xs ~ source 
+             , Target (Project source .! l) ~ slot 
+             ) => TMVar (Entity source)
+               -> STMNode slot 
+  pathify tmv = STMNode $ readTMVar tmv >>= \e ->  locate' myPath e 
+    where  
+      proxified  = mkProxy (Proxy @(Project source))
+
+      myPath :: Segment' (xs :> 'Down (l ':= slot))
+      myPath = withDict (mapHas @Segment' @l @(xs :> 'Down (l ':= slot)) @(Project source)) $ pathed R..! (Label @l)
+
+      pathed :: Rec (R.Map Segment' (Project source))
+      pathed = R.transform @NormalChartedLocate @(Project source) @Proxy @Segment' go proxified 
+
+      go :: forall p. (Charted p, Normalized p) => Proxy p -> Segment' p 
+      go Proxy = chart @p
+
+
+{--
+instance ( Forall (Project source) NormalChartedLocate 
+      , Forall (Project source) Locate 
+      , AllUniqueLabels (R.Map Proxy (Project source))
+      , AllUniqueLabels (Project source)
+      , Forall (R.Map Proxy (Project source)) Default) => HasPathAt (source :: SlotData) (lt :: Symbol := SlotData)
+--}

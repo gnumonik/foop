@@ -25,6 +25,7 @@ import Data.Foop.Slot
 import Data.Functor 
 import Data.Foop.Paths 
 import Data.Foop.Exists
+import Data.Type.Equality
 
 
 -- | Extracts a label `l` from a `SlotKey l slots q i r`
@@ -39,27 +40,22 @@ withExEval :: forall deps roots shoots surface query  r
 withExEval (ExEvalState e) f = f e
 
 -- | Constructs an entity from a model
-new_ :: forall index surface slots query context deps loc 
+new_ :: forall index surface roots query shoots context deps loc  state 
         . ( Ord index
-          , Forall slots SlotOrdC
-          ) => Segment' loc 
+          , SlotConstraint shoots
+          , AllExtend loc deps
+          , Forall roots SlotOrdC) => Segment 'Begin loc 
             -> RootOf loc
-            -> Model loc deps (Slot index surface slots query) 
-            -> IO (Entity (Slot index surface slots query))
-new_ path tmv (Model spec@(MkSpec iState qHandler renderR slots _)) = do 
-  let eState = initE path tmv spec 
+            -> Spec loc deps shoots state (Slot index surface roots query) 
+            -> IO (Entity (Slot index surface roots query))
+new_ path tmv spec@(MkSpec iState qHandler renderR slots _) = do 
+  eState <- initE path tmv spec 
   e <- newTVarIO $ mkEntity_ @index eState 
   pure $ Entity e 
 
-{-- 
-  espec -> do
-    let evalSt = initE cxt espec
-    eStore <- newTVarIO $  mkEntity_ evalSt
-    pure $  Entity eStore
---}
 -- | Constructs an entity from a model
 new_' :: forall roots shoots query surface i state deps 
-        . ( Forall shoots SlotOrdC
+        . ( Forall roots SlotOrdC
           , AllExtend ('Begin :> 'Start (Slot () surface roots query)) deps 
           , SlotConstraint shoots
           )
@@ -89,29 +85,34 @@ new_' spec@MkSpec{..} storage surface tree   =  do
 
     pure $  Entity eStore
 
-mkRoots :: forall roots models parent  
-         . ( roots ~ UnModel models
-           , AllCompatibleModels parent models 
-           ) => RootOf parent 
-             -> Segment' parent 
-             -> Rec models 
-             -> IO (ETree roots)
-mkRoots rootOf path models = ETree <$> R.traverse ( rootOf path models  
+mkRoots :: forall roots models parent   
+         . Models parent (ExtendAll parent) roots 
+        -> Segment 'Begin parent 
+        -> RootOf parent 
+        -> IO (ETree roots)
+mkRoots rootOf path models = undefined -- ETree <$> R.traverse ( rootOf path models  
 
 -- | Initializes an EvalState given a Spec 
-initE :: forall loc slots surface st q deps roots shoots i
-       . ( SlotConstraint slots)
-      => Segment' loc
+initE :: forall loc surface st q deps roots shoots i
+       . ( SlotConstraint shoots 
+         , AllExtend loc deps
+         , Extends loc (InitPath (Slot i surface roots q)))
+      => Segment 'Begin loc
       -> RootOf loc 
       -> Spec loc deps shoots st (Slot i surface roots q)
-      -> EvalState deps roots shoots surface st q 
+      -> IO (EvalState deps roots shoots surface st q) 
 initE path tmv espec@MkSpec{..}
-  = EvalState {_entity      = espec
+  = case extendPath path (initPath @(Slot i surface roots q)) of 
+      newPath -> do 
+        rs <- mkRoots roots newPath tmv 
+        Handler h     <- pure handleQuery 
+        MkPaths deps  <- pure $ pos h 
+        pure $ EvalState {_entity      = espec
               ,_state       = initialState
-              ,_shoots      = mkShoots shoots  
+              ,_shoots      = undefined -- mkShoots shoots  
               ,_surface     = render renderer initialState
-              ,_roots       = mkRoots @roots roots 
-              ,_environment = tmv 
+              ,_roots       = rs 
+              ,_environment = atlas @loc tmv path deps 
               }
 
 -- | Constructs and EntityStore from an EvalState 
@@ -143,16 +144,16 @@ run i (Entity tv) = do
 
 -- internal, don't export
 -- | Retrieves the map of the entity's children. For internal use.
-getSlot :: forall  label roots shoots slot st q deps 
+getShoot :: forall  label shoots slot roots st q deps 
          . (ChildC label shoots slot, SlotConstraint shoots)
-        => EntityM deps roots shoots st q IO (StorageBox slot)
-getSlot = EntityM . liftF $ GetSlot (SlotKey :: SlotKey label slots slot) id
+        => EntityM deps roots shoots st q IO (ELeaf slot)
+getShoot = EntityM . liftF $ GetShoot (SlotKey :: SlotKey label shoots slot) id
 
 -- don't export 
 -- | `getSlot` but with a SlotKey (which serves as a dictionary for ChildC) instead of the ChildC constraint 
-getSlot' ::  SlotKey label shoots slot
-         -> EntityM deps roots shoots state query IO (StorageBox slot)
-getSlot' slot = EntityM . liftF $ GetSlot slot id
+getShoot' ::  SlotKey label shoots slot
+         -> EntityM deps roots shoots state query IO (ELeaf slot)
+getShoot' slot = EntityM . liftF $ GetShoot slot id
 
 -- | Construct a `Tell` query from a data constructor of a query algebra
 mkTell :: Tell q -> q ()
@@ -179,7 +180,7 @@ tell_ :: forall label shoots roots  i su cs q state query deps
      -> Tell q
      -> EntityM deps roots shoots state query IO ()
 tell_ i q = do
-  MkStorageBox mySlot <- getSlot @label
+  ELeaf mySlot <- getShoot @label
   case M.lookup  i mySlot of
     Nothing -> pure ()
     Just e  -> do
@@ -193,11 +194,10 @@ tell_ i q = do
 --    E.g. `tell @"childLabel" MyQuery` 
 tellAll :: forall label shoots roots  i su cs q state query deps  
       . (ChildC label shoots (Slot i su cs q), SlotConstraint shoots)
-     => i
-     -> Tell q
+     =>  Tell q
      -> EntityM deps roots shoots state query IO ()
 tellAll q = do
-  MkStorageBox mySlot <- getSlot @label @shoots @(Slot i su cs q)
+  ELeaf mySlot <- getShoot @label @shoots @(Slot i su cs q)
   let slotKeys = M.keys mySlot
   mapM_ (\i -> pure (M.lookup i mySlot) >>= \case
                 Nothing -> pure ()
@@ -223,7 +223,7 @@ request_ :: forall label i su cs q roots shoots state query x deps
      -> Request q x
      -> EntityM deps roots shoots state query IO (Maybe x)
 request_ i q = do
-  MkStorageBox mySlot <- getSlot @label
+  ELeaf mySlot <- getShoot @label
   case M.lookup i mySlot of
     Nothing -> pure Nothing
     Just e  -> do
@@ -236,7 +236,7 @@ requestAll :: forall label i su cs q roots shoots state query deps x
      => Request q x
      -> EntityM deps roots shoots state query IO [x]
 requestAll q = do
-  MkStorageBox mySlot <- getSlot @label
+  ELeaf mySlot <- getShoot @label
   let slotKeys = M.keys mySlot
   catMaybes <$> mapM (\i -> request_ @label i q) slotKeys
 
@@ -271,7 +271,7 @@ evalF eState@EvalState{..} = \case
       case apNT (extract hQuery) (Q q) of
         EntityM ef -> foldF (evalF (EvalState {..})) ef
 
-  GetShoot slot f ->  pure . f $ lookupStorage slot _storage
+  GetShoot slot f ->  pure . f $ lookupLeaf slot _shoots
 
   GetRoot _ _ -> undefined 
 
@@ -308,7 +308,7 @@ delete :: forall label roots shoots state i su cs q query deps
       . (ChildC label shoots (Slot i su cs q), Forall shoots SlotOrdC)
      => i
      -> EntityM deps roots shoots state query IO ()
-delete i = EntityM . liftF $ Delete (SlotKey :: SlotKey label slots (Slot i su cs q)) i ()
+delete i = EntityM . liftF $ Delete (SlotKey :: SlotKey label shoots (Slot i su cs q)) i ()
 
 -- | Creates a child component at the designaed label and index from the Prototype argument.
 -- 

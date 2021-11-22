@@ -170,7 +170,7 @@ data EBranch :: Row SlotData -> Type where
           -> EBranch ss 
 
 data ELeaf :: SlotData -> Type where 
-  Eleaf :: M.Map (Indexed (Slot i su rs q)) (Entity (Slot i su rs q))
+  ELeaf :: M.Map (Indexed (Slot i su rs q)) (Entity (Slot i su rs q))
         -> ELeaf (Slot i su rs q)
 
 -- | `~>` is a type synonym for natural transformations (generally between functors
@@ -236,22 +236,34 @@ type family UnModelR (models :: [LT Type]) :: [LT SlotData] where
 -- (deferred this before but b/c need to integrate models at the spec stage, 
 -- can't do so now. bleh)
 
+data Rooted :: Row SlotData -> Row Type -> Type where 
+  MkRooted :: forall roots rootsM
+          . roots ~ UnModel rootsM 
+         => roots :~: UnModel rootsM
+         ->  Rec rootsM 
+         -> Rooted roots rootsM 
 -- | A `Spec` is the GADT from which an Entity is constructed. 
 type Spec :: Path -> Row Type -> Row SlotData -> Type -> SlotData -> Type 
 data Spec loc deps shoots state slot where
-  MkSpec :: forall state query deps surface rootsM roots shoots i loc.
+  MkSpec :: forall state query deps surface roots shoots i loc.
    ( WellBehaved roots
-   , roots ~ UnModel rootsM 
    , Extends loc ('Begin :> 'Start (Slot i surface roots query)) 
-   , AllCompatibleModels (Extension loc ('Begin :> 'Start (Slot i surface roots query))) rootsM
-   )=> 
+   ) => 
     { initialState   :: state 
     , handleQuery    :: Handler (Slot i surface roots query) query deps roots shoots state
     , renderer       :: Renderer state surface 
     , shoots         :: Proxy shoots 
-    , roots          :: Rec rootsM
+    , roots          :: Models loc (ExtendAll (Extension loc (InitPath (Slot i surface roots query)))) roots 
     } -> Spec loc deps shoots state (Slot i surface roots query)
 
+class All (Exists (Extends loc) (Segment 'Begin)) roots => ExtendAll loc roots 
+
+type OKModels loc roots = Models loc (ExtendAll loc) roots  
+    
+type InitPath (slot :: SlotData) = ('Begin :> 'Start slot) 
+
+initPath :: forall (slot :: SlotData) i su cs q. (slot ~ Slot i su cs q, Locate ('Begin :> 'Start slot) ) => Segment 'Begin ('Begin :> 'Start slot)
+initPath = toSeg $ chart @('Begin :> 'Start slot)
 -- | `AlgebraQ query a` is a wrapper around a type which records a query algebra. 
 --   
 --   The first type argument (i.e. `query`) has kind `Type -> Type`
@@ -261,7 +273,7 @@ newtype AlgebraQ query a =  Q (Coyoneda query a)
 --   and a Context which can be read from inside the Prototype monad 
 type EvalState :: Row Type -> Row SlotData -> Row SlotData -> Type -> Type -> (Type -> Type) -> Type
 data EvalState    deps roots shoots surface st q where 
-  EvalState :: (SlotConstraint roots) => {
+  EvalState :: (SlotConstraint shoots) => {
       _entity      :: Spec loc deps shoots st (Slot i surface roots q)
     , _state       :: st
     , _shoots      :: EBranch shoots 
@@ -420,11 +432,14 @@ data Segment :: Path -> Path -> Type where
 
 data Segment' :: Path -> Type where 
   Here' :: forall i su rs ss q 
-        .  Segment' ('Begin :> 'Start (Slot i su rs q))
+         . Locate ('Begin :> 'Start (Slot i su rs q)) 
+        => Segment' ('Begin :> 'Start (Slot i su rs q))
 
   ChildA' :: forall l l' i su rs ss q i' su' rs' ss' q' old 
          . ( KnownSymbol l'
          ,   HasType l' (Slot i' su' rs' q') rs 
+         ,   Locate ('Begin :> Start (Slot i su rs q))
+         ,   Locate ('Begin :> Start (Slot i su rs q) :> Down (l' ':= Slot i' su' rs' q'))
          ) => SlotKey l' rs (Slot i' su' rs' q')  
            -> Segment' ('Begin :> Start (Slot i su rs q))
            -> Segment' ('Begin :> Start (Slot i su rs q) :> Down (l' ':= Slot i' su' rs' q'))
@@ -433,12 +448,21 @@ data Segment' :: Path -> Type where
   ChildB' :: forall l l' i su rs ss q i' su' rs' ss' q' old 
          . ( KnownSymbol l'
          ,   HasType l' (Slot i' su' rs' q') rs 
+         ,   Locate (old :> 'Down (l ':= Slot i su rs q))
+         ,   Locate (old :> 'Down (l ':= Slot i su rs q) :> Down (l' ':= Slot i' su' rs' q'))
          ) => SlotKey l' rs (Slot i' su' rs' q')  
            -> Segment' (old :> 'Down (l ':= Slot i su rs q))
            -> Segment' (old :> 'Down (l ':= Slot i su rs q) :> Down (l' ':= Slot i' su' rs' q'))
 
 class Locate (path :: Path) where 
   locate :: Segment' path -> Entity (Source path) -> STM (ENode (Target path))
+
+locate' :: forall path. Segment' path -> Entity (Source path) -> STM (ENode (Target path))
+locate' seg e = case seg of 
+  h@Here' -> locate h e 
+  ca@(ChildA' _ _) -> locate ca e 
+  cb@(ChildB' _ _) -> locate cb e
+
 
 -- | Appends two paths 
 type family Connect (parent :: Path) (child :: Path) :: Path where 
@@ -491,12 +515,13 @@ type family Normalize (path :: Path) :: Path where
 type CanNormalize path = ( Source path ~ Source (Normalize path)
                          , Target path ~ Target (Normalize path)) 
 
-class Target path ~ Target (Normalize path) => 
+class ( Target path ~ Target (Normalize path) 
+      , Locate (Normalize path))=> 
   Normalizes (path :: Path) where 
         normalize :: Segment 'Begin path -> Segment' (Normalize path)
 
 -- A/B
-instance Normalizes ('Begin :> 'Start (Slot i su rs q)) where
+instance Locate ('Begin :> 'Start (Slot i su rs q)) => Normalizes ('Begin :> 'Start (Slot i su rs q)) where
   normalize Here = Here'
 
 -- C 
@@ -506,6 +531,7 @@ instance ( KnownSymbol l'
          , Ord i'
          , Forall rs SlotOrdC 
          , Forall rs' SlotOrdC 
+         , Locate (Normalize ('Begin :> Start (Slot i su rs q) :> 'Down (l' ':= Slot i' su' rs' q')) )
          )
        => Normalizes ('Begin :> Start (Slot i su rs q) :> 'Down (l' ':= Slot i' su' rs' q')) where 
             normalize (Child old) = ChildA' SlotKey (normalize old)
@@ -518,6 +544,7 @@ instance ( KnownSymbol l'
          , Ord a
          , Forall rs SlotOrdC 
          , Forall c SlotOrdC 
+         , Locate (Normalize (old :> Down (l ':= Slot i su rs q) :> 'Down (l' ':= (Slot a b c d))) )
          )
        => Normalizes (old :> Down (l ':= Slot i su rs q) :> 'Down (l' ':= (Slot a b c d))) where 
             normalize (Child old) = ChildB' SlotKey $ normalize old
@@ -546,12 +573,17 @@ instance (Normalizes old
         ) => Normalizes (old :> 'Down (l ':= Slot i su rs q) :> Up up1 :> Up up2) where 
           normalize (Parent (Parent (Child old))) = normalize old 
 
+class Normalize p ~ p => Normalized p where 
+  normalized :: Dict (Normalize p ~ p)
+  normalized = Dict  
+
+instance Normalize p ~ p => Normalized p  
 
 class Normalizes p => Charted (p :: Path) where 
   chart :: Segment' (Normalize p) 
 
 -- A/B 
-instance  Charted ('Begin :> 'Start (Slot i su rs q)) where 
+instance  Locate ('Begin :> 'Start (Slot i su rs q)) => Charted ('Begin :> 'Start (Slot i su rs q)) where 
   chart = Here' 
 
 -- C (start down)
@@ -562,6 +594,7 @@ instance ( KnownSymbol l
          , Ord i'
          , Forall rs SlotOrdC 
          , Forall rs' SlotOrdC 
+         , Locate ('Begin :> Start (Slot i su rs q) :> 'Down (l' ':= Slot i' su' rs' q'))
          ) => Charted ('Begin :> Start (Slot i su rs q) :> 'Down (l' ':= Slot i' su' rs' q')) where 
         chart = ChildA' SlotKey Here' 
 
@@ -574,6 +607,8 @@ instance ( KnownSymbol l'
          , Ord i'
          , Forall rs SlotOrdC 
          , Forall rs' SlotOrdC 
+         , Locate  ((Normalize old ':> 'Down (l ':= Slot i su rs q))  ':> 'Down (l' ':= Slot i' su' rs' q'))
+         , Locate (old :> Down (l ':= Slot i su rs q) :> 'Down (l' ':= Slot i' su' rs' q'))
          )
        => Charted (old :> Down (l ':= Slot i su rs q) :> 'Down (l' ':= Slot i' su' rs' q')) where 
             chart = ChildB' SlotKey (chart @(old :> Down (l ':= Slot i su rs q)))
@@ -613,6 +648,12 @@ class ( Connects parent child
              -> Segment 'Begin child 
              -> Segment' (Extension parent child)
   extendPath p c = normalize $ connect p c 
+
+  sameTarget :: Target child :~: Target (Extension parent child)
+  sameTarget = Refl 
+
+  sameSource :: Source parent :~: Source (Extension parent child)
+  sameSource = Refl 
 
 instance ( Connects parent child
       , Normalizes (Connect parent child)
@@ -680,6 +721,17 @@ type family (<>) (xs :: [k]) (ys :: [k]) :: [k] where
   xs  <> '[] = xs 
   (x ': xs) <>  ys = x ': (xs <> ys) 
 
+{--
+first we make proxies 
+
+then we make paths to 
+
+then we make functions 
+--}
+
+type family Project (slot :: SlotData) :: Row Path where 
+  Project slot = R (ReadLabels (Projections slot))
+
 type family ReadLabels (p :: [Path]) :: [LT Path] where 
   ReadLabels '[] = '[]
   ReadLabels (x ': xs) = ReadLabel x ': ReadLabels xs 
@@ -705,7 +757,7 @@ type family ProjectionsR2 slot lts where
     = ('Begin :> 'Start (Slot i su rs q) :> 'Down (l ':= newSlot)) 
       ': (ConnectEmAll  ('Begin :> 'Start (Slot i su rs q) :> 'Down (l ':= newSlot)) 
                      (Projections newSlot ) 
-      <> ProjectionsR2 (Slot i su rs q) rest )
+      <> ProjectionsR2 (Slot i su rs q) rest)
 
 type family ConnectEmAll (p :: Path) (ps :: [Path]) :: [Path] where 
   ConnectEmAll p '[] = '[] 
@@ -730,3 +782,110 @@ instance Each (StartsAt slot) paths => Anchored slot paths
 class (El p (Projections slot), Anchored slot (Projections slot)) => ProjectsTo p slot
 instance (El p (Projections slot), Anchored slot (Projections slot)) => ProjectsTo p slot 
 
+toSeg :: forall path. Segment' path -> Segment 'Begin path 
+toSeg = \case 
+  Here' -> Here 
+  ChildA' k rest -> Child (toSeg rest)
+  ChildB' k rest -> Child (toSeg rest) 
+(+>) :: Segment x p1 -> (Segment x p1 -> Segment x p2) -> Segment x p2 
+p1 +> p2 = p2 p1 
+
+data SlotBox :: Type -> Type -> Row SlotData -> (Type -> Type) -> Type where 
+  SlotBox :: forall i su rs q
+           . SlotBox i su rs q 
+
+data Slotted :: (Type -> Constraint) -> (Type -> Constraint) -> (Row SlotData -> Constraint) -> ((Type -> Type) -> Constraint) -> SlotData -> Type where 
+  Slotted :: forall (cI :: Type -> Constraint)
+                    (cS :: Type -> Constraint)
+                    (cR :: Row SlotData -> Constraint)
+                    (cQ :: (Type -> Type) -> Constraint)
+                    (i :: Type)
+                    (s :: Type)
+                    (r :: Row SlotData)
+                    (q :: Type -> Type)
+                    (slot :: SlotData)  
+           . ( slot ~ Slot i s r q
+             , cI i 
+             , cS s 
+             , cR r 
+             , cQ q
+           ) => SlotBox i s r q -> Slotted cI cS cR cQ slot 
+
+data SlotHas :: (Type -> Constraint) -> (Type -> Constraint) -> (Row SlotData -> Constraint) -> ((Type -> Type) -> Constraint) -> SlotData -> Type where 
+  SlotHas :: forall (cI :: Type -> Constraint)
+                    (cS :: Type -> Constraint)
+                    (cR :: Row SlotData -> Constraint)
+                    (cQ :: (Type -> Type) -> Constraint)
+                    (i :: Type)
+                    (s :: Type)
+                    (r :: Row SlotData)
+                    (q :: Type -> Type)
+                    (slot :: SlotData)  
+           . ( slot ~ Slot i s r q
+             , cI i 
+             , cS s 
+             , cR r 
+             , cQ q
+           ) => SlotHas cI cS cR cQ slot 
+
+type SlotHasC :: (Type -> Constraint) -> (Type -> Constraint) -> (Row SlotData -> Constraint) -> ((Type -> Type) -> Constraint) -> SlotData -> Constraint 
+class SlotHasC cI cS cR cQ slot where
+  slotted :: Slotted cI cS cR cQ slot 
+
+  slotHas :: SlotHas cI cS cR cQ slot 
+
+instance (cI i, cS s, cR r, cQ q) => SlotHasC cI cS cR cQ (Slot i s r q) where 
+  slotted = Slotted SlotBox 
+
+  slotHas = SlotHas 
+
+class SlotHasC cI Top Top Top slot => SlotI cI slot where 
+  slotI :: forall i s r q. slot ~ Slot i s r q => Dict (cI i)
+  slotI = case slotHas :: SlotHas cI Top Top Top slot of 
+    SlotHas -> Dict  
+
+instance SlotHasC cI Top Top Top slot => SlotI cI slot 
+
+class SlotHasC Top cS Top Top slot => SlotS cS slot where 
+  slotS :: forall i s r q. slot ~ Slot i s r q => Dict (cS s)
+  slotS = case slotHas :: SlotHas Top cS Top Top slot of 
+    SlotHas -> Dict  
+
+instance SlotHasC Top cS Top Top slot => SlotS cS slot 
+
+class SlotHasC Top Top cR Top slot => SlotR cR slot where 
+  slotR :: forall i s r q. slot ~ Slot i s r q => Dict (cR r)
+  slotR = case slotHas :: SlotHas Top Top cR Top slot of 
+    SlotHas -> Dict  
+
+instance SlotHasC Top Top cR Top slot => SlotR cR slot
+
+class SlotHasC Top Top Top cQ slot => SlotQ cQ slot where 
+  slotQ :: forall i s r q. slot ~ Slot i s r q => Dict (cQ q)
+  slotQ = case slotHas :: SlotHas Top Top Top cQ slot of 
+    SlotHas -> Dict  
+
+instance SlotHasC Top Top Top cQ slot => SlotQ cQ slot 
+
+
+
+type family ModelOf (slot :: SlotData) (m :: Type) :: Constraint where 
+  ModelOf slot (Model loc path slot) = () 
+
+
+data Register :: Path  -> (Row Type -> Constraint) -> SlotData -> Type where 
+  Register :: forall 
+             (cD :: Row Type -> Constraint) 
+             (path :: Path)
+             (deps :: Row Type)
+             (slot :: SlotData)
+           . (cD deps 
+           ) => Model path deps slot -> Register path cD slot 
+
+data Models :: Path -> (Row Type -> Constraint) -> Row SlotData -> Type where 
+  Models :: forall 
+             (path :: Path)
+             (cD :: Row Type -> Constraint) 
+             (slots :: Row SlotData)
+           . Rec (R.Map (Register path cD) slots)
+          -> Models path cD slots  

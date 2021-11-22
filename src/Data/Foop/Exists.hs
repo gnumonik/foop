@@ -11,6 +11,8 @@ import qualified Data.Row.Records as R
 import Data.Proxy
 import Data.Type.Equality (type (:~:) (Refl))
 import Data.Void 
+import Data.Row.Internal 
+import GHC.TypeLits (Symbol)
 
 -- it's prettier than "Unconstrained1"
 type Top :: forall k. k -> Constraint 
@@ -257,3 +259,171 @@ allTo f = R.transform @(Exists c f) @children @(Ex c f) @(Deriving c f g) go
   where 
     go :: forall t. Exists c f t => Ex c f t -> Deriving c f g t 
     go (Ex ft) = Deriving f (Ex ft)
+
+
+data Mapped :: (k -> Constraint) -> (k -> Type) -> Row k -> Row Type -> Type where 
+  Mapped :: forall k 
+            (c :: k -> Constraint) 
+            (f :: k -> Type)
+            (rt :: Row Type)  
+            (row :: Row k)
+          . ( Forall rt (Exists c f) 
+            , rt ~ R.Map f row) 
+          => Mapped c f row rt 
+
+type  MappedC :: (k -> Constraint) -> (k -> Type) -> Row k -> Row Type -> Constraint 
+class MappedC c f rk rt where 
+  mapped :: Mapped c f rk rt 
+
+instance ( Forall rt (Exists c f)
+         , rt ~ R.Map f rk) => MappedC c f rk rt where 
+  mapped = Mapped 
+
+data Hide2 :: (k1 -> k2 -> k3 -> Type) -> (k1 -> Constraint) -> (k2 -> Constraint) -> k3 -> Type where 
+  Hide2 :: forall k1 k2 k3 
+          (c1 :: k1 -> Constraint)
+          (c2 :: k2 -> Constraint)
+          (c3 :: k3 -> Constraint )
+          (a :: k1)
+          (b :: k2) 
+          (c :: k3)
+          (f :: k1 -> k2 -> k3 -> Type)
+         . (c1 a, c2 b) => f a b c -> Hide2 f c1 c2 c 
+
+type family Hide2F1 (f :: k1 -> k2 -> k3 -> Type) (c1 :: k1 -> Constraint) (c2 :: k2 -> Constraint) (row :: Row k3) :: Row Type  where 
+  Hide2F1 f c1 c2 (R lts) =  R (Hide2F1R f c1 c2 lts) 
+
+type family Hide2F1R  (f :: k1 -> k2 -> k3 -> Type) (c1 :: k1 -> Constraint) (c2 :: k2 -> Constraint) (row ::  [LT k3]) :: [LT Type] where 
+  Hide2F1R f c1 c2 '[] = '[]
+  Hide2F1R f c1 c2 (l ':-> c ': lts) = l ':-> Hide2 f c1 c2 c ': Hide2F1R f c1 c2 lts 
+
+type family Hide2F2 (f :: k1 -> k2 -> k3 -> Type) (c1 :: k1 -> Constraint) (c2 :: k2 -> Constraint) (row :: Row Type) :: Row Type  where 
+  Hide2F2 f c1 c2 (R lts) =  R (Hide2F2R f c1 c2 lts) 
+
+type family Hide2F2R  (f :: k1 -> k2 -> k3 -> Type) (c1 :: k1 -> Constraint) (c2 :: k2 -> Constraint) (row ::  [LT Type]) :: [LT Type] where 
+  Hide2F2R f c1 c2 '[] = '[]
+  Hide2F2R f c1 c2 (l ':-> f a b c ': lts) = l ':-> Hide2 f c1 c2 c ': Hide2F2R f c1 c2 lts 
+
+
+type family Take2 (f :: k1 -> k2 -> k3 -> Type) (rt :: Row Type) :: Row k3 where 
+  Take2 f (R lts) = R (Take2R f lts)  
+
+type family Take2R (f :: k1 -> k2 -> k3 -> Type) (lts :: [LT Type]) :: [LT k3] where 
+  Take2R f '[] = '[]
+  Take2R f (l ':-> f a b c ': rest) = l ':-> c ': Take2R f rest 
+
+
+--- just shoving every potentially useful constraint i can think of into this 
+class ( rk ~ Take2 f rt
+      , Hide2F1 f c1 c2 rk ~ Hide2F2 f c1 c2 rt 
+      , R.Map (Hide2 f c1 c2) rk ~ Hide2F2 f c1 c2  rt 
+      , BiForall rt rk c
+      , Forall rt (Exists3 c1 c2 Top f)) => Contains2 c c1 c2 rt f rk where 
+  contains :: Dict ( rk ~ Take2 f rt
+                   , Hide2F1 f c1 c2 rk ~ Hide2F2 f c1 c2 rt 
+                   , R.Map (Hide2 f c1 c2) rk ~ Hide2F2 f c1 c2 rt
+                   , BiForall rt rk c
+                   , Forall rt (Exists3 c1 c2 Top f))
+  contains = Dict 
+
+data HasEx2W :: Symbol -> (k1 -> k2 -> k3 -> Type) -> Row Type -> k3 -> Type where 
+  HasEx2W :: forall k1 k2 k3 (l :: Symbol) (f :: k1 -> k2 -> k3 -> Type) rt (a :: k1) (b :: k2) (c :: k3) 
+           . ( KnownSymbol l
+             , HasType l (f a b c) rt
+             ) => HasEx2W l f rt c 
+
+class HasEx2 (l :: Symbol) (f :: k1 -> k2 -> k3 -> Type) (rt :: Row Type) (c :: k3) where 
+  hasEx2 :: HasEx2W l f rt c
+
+instance ( KnownSymbol l
+         , HasType l (f a b c) rt) => HasEx2 l f rt c where 
+           hasEx2 = HasEx2W  
+
+type family Arg3 (f :: k1 -> k2 -> k3 -> Type) (t :: Type) :: k3 where 
+  Arg3 f (f a b c) = c 
+
+type BiLabel2 ::  (k1 -> k2 -> k3 -> Type) -> Row Type -> Row k3 -> k3 -> Symbol -> Constraint 
+class (HasEx2 l f rt c, HasType l c rk) => BiLabel2 f rt rk c l where 
+  biLabel2 :: Dict ( HasEx2 l f rt c 
+                   , HasType l c rk)
+
+instance ( HasEx2 l f rt c 
+         , HasType l c rk) => BiLabel2 f rt rk c l where 
+           biLabel2 = Dict 
+
+type family ComplementF (s :: [Symbol]) (rk :: Row k) :: Row k where 
+  ComplementF s rk = R (ComplementR s rk)
+
+type family ComplementR (s :: [Symbol]) (rk :: Row k) :: [LT k] where 
+  ComplementR '[] rk = '[]
+  ComplementR (l ': ls) rk = (l ':-> (rk .! l) ) ': ComplementR ls rk  
+
+
+data Symbols :: [Symbol] -> Type where 
+  LZ :: Symbols '[]
+  LS :: KnownSymbol l => Symbols ls -> Symbols (l ': ls)
+
+
+class KnownSymbols (ss :: [Symbol]) where 
+  symbols :: Symbols ss  
+
+instance KnownSymbols '[] where 
+  symbols = LZ 
+
+instance (KnownSymbols xs, KnownSymbol l) => KnownSymbols (l ': xs) where 
+  symbols = LS symbols 
+
+reifyLabels :: forall k (rk :: Row k). KnownSymbols (Labels rk) => Symbols (Labels rk)
+reifyLabels = symbols @(Labels rk)
+
+
+
+
+
+
+
+instance ( rk ~ Take2 f rt
+      , Hide2F1 f c1 c2 rk ~ Hide2F2 f c1 c2 rt 
+      , R.Map (Hide2 f c1 c2) rk ~ Hide2F2 f c1 c2  rt 
+      , BiForall rt rk c
+      , Forall rt (Exists3 c1 c2 Top f))  => Contains2 c c1 c2 rt f rk 
+
+data Mapped2 :: (Type -> k3 -> Constraint) -> (k1 -> k2 -> k3 -> Type) -> (k1 -> Constraint) -> (k2 -> Constraint) ->  Row k3 -> Row Type -> Type where 
+  Mapped2 :: forall k1 k2 k3 
+            (c1 :: k1 -> Constraint)
+            (c2 :: k2 -> Constraint)
+            (bc :: Type -> k3 -> Constraint)
+            (f :: k1 -> k2 -> k3 -> Type)
+            (rt :: Row Type)  
+            (row :: Row k3)
+          . ( Forall rt (Exists3 c1 c2 Top f) 
+            , Contains2 bc c1 c2 rt f row 
+            ) => Mapped2 bc f c1 c2 row rt 
+
+type Mapped2C :: (Type -> k3 -> Constraint) -> (k1 -> k2 -> k3 -> Type) -> (k1 -> Constraint) -> (k2 -> Constraint) ->  Row k3 -> Row Type -> Constraint 
+class Mapped2C bc f c1 c2 row rt where 
+  mapped2 :: Mapped2 bc f c1 c2  row rt 
+
+instance ( Forall rt (Exists3 c1 c2 Top f) 
+         , Contains2 bc c1 c2 rt f row) => Mapped2C bc f c1 c2 row rt where 
+           mapped2 = Mapped2 
+
+
+
+transformulate :: forall c1 c2 rt f row 
+                . (Contains2 Unconstrained2 c1 c2 rt f row) 
+               => Rec rt 
+               -> Rec (R.Map (Hide2 f c1 c2) row)
+transformulate rt = case contains @Unconstrained2 @c1 @c2 @rt @f @row of 
+  Dict -> undefined 
+    
+
+
+{--
+unmap2 :: forall bc f c1 c2 c3 row rt g 
+        . Mapped2C bc f c1 c2 c3 row rt
+       => (forall a b c. (c1 a, c2 b, c2 c) => f a b c -> g c)
+       -> Rec rt 
+       -> Rec (R.Map g row) 
+unmap2 = undefined -- biMetamorph (Proxy :: (Proxy (,),Proxy)) goEmpty uncons cons  
+--}

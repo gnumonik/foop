@@ -51,11 +51,11 @@ observeE (Entity tv) =  do
       pure $ MkRenderLeaf surface (MkRenderTree children)
 --}
 -- passing around SlotKeys b/c writing all these constraints everywhere gets tiring 
-lookupStorage :: forall label slots slot
+lookupLeaf :: forall label slots slot
                . SlotKey label slots slot
-              -> Rec (R.Map StorageBox slots)
-              -> StorageBox slot
-lookupStorage key@SlotKey storage = withDict (deriveHas @StorageBox key) $ storage .! (Label @label)
+              -> EBranch slots 
+              -> ELeaf slot
+lookupLeaf key@SlotKey (EBranch storage) = withDict (deriveHas @ELeaf key) $ storage .! (Label @label)
 
 
 
@@ -68,10 +68,10 @@ modifyStorage key@SlotKey f storage
   = withDict (deriveHas @StorageBox key)
   $ R.update (Label @label) (f $ storage .! (Label @label)) storage
 
-mkProxy :: ( AllUniqueLabels slots
+mkProxy :: forall slots. ( AllUniqueLabels slots
          , AllUniqueLabels (R.Map Proxy slots)
          , Forall (R.Map Proxy slots) Default
-         ) => Proxy (slots :: Row SlotData)
+         ) => Proxy slots 
            -> Rec (R.Map Proxy slots)
 mkProxy Proxy = R.default' @Default def
 
@@ -92,7 +92,11 @@ toStorage proxy = R.transform @SlotOrdC @slots @Proxy @StorageBox go
        -> StorageBox slot
     go proxy' =  MkStorageBox M.empty
 
+apSegment :: forall slot path x. slot ~ Source path => Segment x path -> Segment x path 
+apSegment = id 
 
+
+wumbum = Here +> Parent +> Parent 
 
 
 
@@ -112,15 +116,8 @@ mkStorage :: (AllUniqueLabels slots, AllUniqueLabels (R.Map Proxy slots),
  Proxy slots -> Rec (R.Map StorageBox slots)
 mkStorage proxy = toStorage proxy $ mkProxy  proxy
 
-
-projProxy :: Proxy (slot :: SlotData) -> Proxy (ReadLabels (Projections slot))
+projProxy :: Proxy (slot :: SlotData) -> Proxy (Project slot)
 projProxy Proxy = Proxy 
-
-
-
-
-
-
 
 hmwmbm = projProxy (Proxy @MySlot)
 
