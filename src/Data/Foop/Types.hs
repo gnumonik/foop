@@ -7,6 +7,7 @@ module Data.Foop.Types where
 import Data.Kind
 import GHC.TypeLits
 import Data.Row
+
 import qualified Data.Map as M
 import Control.Monad.State.Class
 import Control.Monad.IO.Class
@@ -85,17 +86,18 @@ data SlotKey :: Symbol -> Row SlotData -> SlotData -> Type where
 --   `query` is the ADT which represents the component's algebra 
 --
 --   `m` is the inner functor (which for now will always be IO)
-type EntityF :: Row Type -> Row SlotData -> Row SlotData -> Type -> (Type -> Type) -> (Type -> Type) -> Type -> Type
+type EntityF :: [LT SlotData] -> Row SlotData -> Row SlotData -> Type -> (Type -> Type) -> (Type -> Type) -> Type -> Type
 data EntityF deps roots shoots state query m a where
   State   :: (state -> (a,state)) -> EntityF deps roots shoots state query m a
 
   Lift    :: m a -> EntityF deps roots shoots state query m a
-
-  Interact :: (HasType l (Segment 'Begin path) deps, KnownSymbol l)
-          => Label l 
+{--
+  Interact :: -- (HasType l (Segment 'Begin path) deps, KnownSymbol l)
+        --  => 
+             Label l 
           -> (Entity (Target path) -> a)
           -> EntityF deps roots shoots state query m a 
-
+--}
   Query    :: Coyoneda query a -> EntityF deps roots shoots state query m a
 
   GetShoot :: SlotKey l shoots slot 
@@ -122,7 +124,7 @@ instance Functor m => Functor (EntityF deps roots shoots state query m) where
   fmap f =  \case
         State k                  -> State (first f . k)
         Lift ma                  -> Lift (f <$> ma)
-        Interact path g          -> Interact path (fmap f g) 
+   --     Interact path g          -> Interact path (fmap f g) 
         Query qb                 -> Query $ fmap f qb
         GetShoot key g           -> GetShoot key $ fmap f g -- (goChild f key g)
         GetRoot key g            -> GetRoot key (fmap f g)
@@ -139,7 +141,7 @@ instance Functor m => Functor (EntityF deps roots shoots state query m) where
 --   `query` is the ADT which represents the entity's algebra 
 --
 --   `m` is the inner functor (which for now will always be IO)
-type EntityM :: Row Type -> Row SlotData -> Row SlotData -> Type -> (Type -> Type) -> (Type -> Type) -> Type -> Type 
+type EntityM :: [LT SlotData] -> Row SlotData -> Row SlotData -> Type -> (Type -> Type) -> (Type -> Type) -> Type -> Type 
 newtype EntityM deps roots shoots state query m a = EntityM (F (EntityF deps roots shoots state query m) a) 
   deriving (Functor, Applicative, Monad)
 
@@ -196,28 +198,16 @@ data Renderer  state surface where
   } -> Renderer state surface 
 
 newtype Handler slot query deps roots shoots state 
-  = Handler {getHandler :: Store (MkPaths slot deps) (AlgebraQ query :~> EntityM  deps roots shoots state query IO)}
+  = Handler {getHandler :: Store (Proxy deps) (AlgebraQ query :~> EntityM  deps roots shoots state query IO)}
 
 class Forall ks c => All c ks where 
   allC :: Dict (Forall ks c)
   allC = Dict 
 instance Forall ks c => All c ks  
 
--- lol @ this
-type AllCompatibleModels parent models 
-  = Forall models (Exists3 Unconstrained1 (All (Exists (Extends parent) (Segment 'Begin))) Unconstrained1 Model)
 
-data Shoots :: Row SlotData -> Type where 
-  MkShoots :: forall shoots 
-            .  Shoots shoots 
 
-data Roots :: Path -> Row Type -> Type where 
-  MkRoots :: forall parent roots 
-           . AllCompatibleModels parent roots 
-          => Rec roots 
-          -> Roots parent roots 
-
-data Model :: Path -> Row Type  -> SlotData -> Type where 
+data Model :: SlotData -> [LT SlotData]  -> SlotData -> Type where 
   Model :: forall surface roots shoots query state deps i loc 
          . (SlotConstraint roots)
         => Spec loc deps shoots state (Slot i surface roots query)
@@ -236,29 +226,21 @@ type family UnModelR (models :: [LT Type]) :: [LT SlotData] where
 -- (deferred this before but b/c need to integrate models at the spec stage, 
 -- can't do so now. bleh)
 
-data Rooted :: Row SlotData -> Row Type -> Type where 
-  MkRooted :: forall roots rootsM
-          . roots ~ UnModel rootsM 
-         => roots :~: UnModel rootsM
-         ->  Rec rootsM 
-         -> Rooted roots rootsM 
+
 -- | A `Spec` is the GADT from which an Entity is constructed. 
-type Spec :: Path -> Row Type -> Row SlotData -> Type -> SlotData -> Type 
+type Spec :: SlotData -> [LT SlotData] -> Row SlotData -> Type -> SlotData -> Type 
 data Spec loc deps shoots state slot where
-  MkSpec :: forall state query deps surface roots shoots i loc.
-   ( WellBehaved roots
-   , Extends loc ('Begin :> 'Start (Slot i surface roots query)) 
-   ) => 
+  MkSpec :: forall state query (deps :: [LT SlotData]) surface roots shoots i loc.
     { initialState   :: state 
     , handleQuery    :: Handler (Slot i surface roots query) query deps roots shoots state
     , renderer       :: Renderer state surface 
     , shoots         :: Proxy shoots 
-    , roots          :: Models loc (ExtendAll (Extension loc (InitPath (Slot i surface roots query)))) roots 
+    , roots          :: Proxy roots 
+    , dependencies   :: Proxy (deps :: [LT SlotData])
     } -> Spec loc deps shoots state (Slot i surface roots query)
 
 class All (Exists (Extends loc) (Segment 'Begin)) roots => ExtendAll loc roots 
 
-type OKModels loc roots = Models loc (ExtendAll loc) roots  
     
 type InitPath (slot :: SlotData) = ('Begin :> 'Start slot) 
 
@@ -271,7 +253,7 @@ newtype AlgebraQ query a =  Q (Coyoneda query a)
 
 -- | Evaluation State. Holds the Prototype Spec, the Prototype's State, 
 --   and a Context which can be read from inside the Prototype monad 
-type EvalState :: Row Type -> Row SlotData -> Row SlotData -> Type -> Type -> (Type -> Type) -> Type
+type EvalState :: [LT SlotData] -> Row SlotData -> Row SlotData -> Type -> Type -> (Type -> Type) -> Type
 data EvalState    deps roots shoots surface st q where 
   EvalState :: (SlotConstraint shoots) => {
       _entity      :: Spec loc deps shoots st (Slot i surface roots q)
@@ -279,11 +261,11 @@ data EvalState    deps roots shoots surface st q where
     , _shoots      :: EBranch shoots 
     , _roots       :: ETree roots
     , _surface     :: surface 
-    , _environment :: AnAtlasOf deps
+    , _environment :: Proxy deps-- AnAtlasOf deps
     } -> EvalState  deps roots shoots surface st q 
  
 -- | Existential wrapper over the EvalState record. 
-data ExEvalState :: Row Type -> Row SlotData -> Row SlotData -> Type -> (Type -> Type) -> Type where
+data ExEvalState :: [LT SlotData] -> Row SlotData -> Row SlotData -> Type -> (Type -> Type) -> Type where
   ExEvalState :: ( SlotConstraint slots) 
               => EvalState deps roots shoots surface st query 
               -> ExEvalState deps roots shoots surface query  
@@ -311,7 +293,7 @@ data Transformer deps roots shoots surface query  where
 --   functionality *combined* with comonad-functionality: We can extract the state. 
 -- 
 --   But mainly this is what it is because Store is my favorite comonad and I jump at any chance to use it :) 
-type EntityStore ::  Row Type -> Row SlotData -> Row SlotData -> Type -> (Type -> Type) -> Type 
+type EntityStore ::  [LT SlotData] -> Row SlotData -> Row SlotData -> Type -> (Type -> Type) -> Type 
 type EntityStore deps roots shoots surface  query 
   = Store (ExEvalState deps roots shoots surface  query) (Transformer deps roots shoots surface query)
 
@@ -544,9 +526,9 @@ instance ( KnownSymbol l'
          , Ord a
          , Forall rs SlotOrdC 
          , Forall c SlotOrdC 
-         , Locate (Normalize (old :> Down (l ':= Slot i su rs q) :> 'Down (l' ':= (Slot a b c d))) )
+         , Locate (Normalize (old :> Down (l ':= Slot i su rs q) :> 'Down (l' ':= Slot a b c d)) )
          )
-       => Normalizes (old :> Down (l ':= Slot i su rs q) :> 'Down (l' ':= (Slot a b c d))) where 
+       => Normalizes (old :> Down (l ':= Slot i su rs q) :> 'Down (l' ':= Slot a b c d)) where 
             normalize (Child old) = ChildB' SlotKey $ normalize old
 
 -- E (start down up)
@@ -583,7 +565,8 @@ class Normalizes p => Charted (p :: Path) where
   chart :: Segment' (Normalize p) 
 
 -- A/B 
-instance  Locate ('Begin :> 'Start (Slot i su rs q)) => Charted ('Begin :> 'Start (Slot i su rs q)) where 
+instance  Locate ('Begin :> 'Start (Slot i su rs q)) 
+       => Charted ('Begin :> 'Start (Slot i su rs q)) where 
   chart = Here' 
 
 -- C (start down)
@@ -868,24 +851,3 @@ class SlotHasC Top Top Top cQ slot => SlotQ cQ slot where
 instance SlotHasC Top Top Top cQ slot => SlotQ cQ slot 
 
 
-
-type family ModelOf (slot :: SlotData) (m :: Type) :: Constraint where 
-  ModelOf slot (Model loc path slot) = () 
-
-
-data Register :: Path  -> (Row Type -> Constraint) -> SlotData -> Type where 
-  Register :: forall 
-             (cD :: Row Type -> Constraint) 
-             (path :: Path)
-             (deps :: Row Type)
-             (slot :: SlotData)
-           . (cD deps 
-           ) => Model path deps slot -> Register path cD slot 
-
-data Models :: Path -> (Row Type -> Constraint) -> Row SlotData -> Type where 
-  Models :: forall 
-             (path :: Path)
-             (cD :: Row Type -> Constraint) 
-             (slots :: Row SlotData)
-           . Rec (R.Map (Register path cD) slots)
-          -> Models path cD slots  

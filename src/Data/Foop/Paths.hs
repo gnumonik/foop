@@ -1,4 +1,5 @@
 {-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE TypeFamilyDependencies #-}
 module Data.Foop.Paths where
 
 
@@ -6,6 +7,7 @@ import Data.Foop.Types
 import qualified Data.Map as M
 import Data.Row.Dictionaries
 import Data.Row
+import Data.Row.Internal
 import qualified Data.Row.Records as R
 import Control.Concurrent.STM
 import Data.Kind
@@ -18,7 +20,7 @@ import Data.Foop.Dictionary
 import GHC.Base
 import Data.Proxy
 import Data.Default
-
+import Data.Constraint 
 
 
 data RootOf :: Path -> Type where 
@@ -131,54 +133,130 @@ withAtlas (AnAtlasOf atlas@(MkAtlas _ _)) = goA atlas
                           @(Segment 'Begin path)
                           @children
 
-data PathFromTo :: SlotData -> SlotData -> Type where 
-  PathFromTo :: forall path slot source 
-                . ( Target path ~ slot 
-                  , Source path ~ source ) 
-               => Segment' path ->  PathFromTo source slot  
 
 newtype STMNode :: SlotData -> Type where 
   STMNode :: STM (ENode slot) -> STMNode slot    
 
-class (Charted p, Normalized p, Locate p) => NormalChartedLocate p where 
-  normalCharted :: Dict (Charted p, Normalized p)
-  normalCharted = Dict 
 
-instance (Charted p, Normalized p, Locate p) => NormalChartedLocate p 
+class (Charted p, Normalized p, SourceOf p source, TargetOf p target) => ConcretePath source target p where 
+  concretePath :: Dict (Charted p, Normalized p, SourceOf p source, TargetOf p target)
+  concretePath = Dict 
 
-type family L (lt :: Symbol := SlotData) :: Symbol where 
-  L (l ':= t) = l
+instance (Charted p, Normalized p, SourceOf p source, TargetOf p target) => ConcretePath source target p
 
-type family T (lt :: Symbol := SlotData) :: SlotData where 
-  T (l ':= t) = t
+type family L (lt :: LT SlotData) :: Symbol where 
+  L (l ':-> t) = l
+
+type family T (lt :: LT SlotData) :: SlotData where 
+  T (l ':-> t) = t
  
 
-data HasCAt :: (k -> Constraint) -> Symbol -> Row k -> Type where 
-  HasCAt :: forall k (c :: k -> Constraint) (rk :: Row k) (l :: Symbol) 
+data HasSome' :: (k -> Constraint) -> Symbol -> Row k -> Type where 
+  HasSome :: forall k (c :: k -> Constraint) (rk :: Row k) (l :: Symbol) 
           . ( WellBehaved rk 
             , KnownSymbol l 
             , HasType l (rk .! l) rk 
-            , c (rk .! l)) => HasCAt c l rk 
+            , c (rk .! l)) => HasSome' c l rk 
 
-class HasCAtC (c :: k -> Constraint) (l :: Symbol) (rk :: Row k)  where 
-  hasCAt :: HasCAt c l rk 
+data Some :: (k -> Constraint) -> (k -> Type) -> Type where 
+  Some :: forall k (c :: k -> Constraint) (f :: k -> Type) (a :: k)
+        . c a => f a -> Some c f 
+
+
+
+
+
+unSome :: Some c f -> (forall a. c a => f a -> r) -> r 
+unSome (Some a) f = f a 
+   
+            
+withSome :: forall k (c :: k -> Constraint) (l :: Symbol) (rk :: Row k) r. HasSome c l rk => (forall (x :: k). c x => r) -> r 
+withSome f = case (hasSome :: HasSome' c l rk) of 
+  HasSome -> f @(rk .! l)
+
+withSome' :: forall k (c :: k -> Constraint) (l :: Symbol) (rk :: Row k) r. HasSome' c l rk -> (forall (x :: k). c x => r) -> r 
+withSome' h f = case h of 
+  HasSome -> f @(rk .! l)
+
+class HasSome (c :: k -> Constraint) (l :: Symbol) (rk :: Row k)  where 
+  hasSome :: HasSome' c l rk 
 
 instance ( HasType l (rk .! l) rk
          , c (rk .! l) 
          , WellBehaved rk 
-         , KnownSymbol l ) =>  HasCAtC c l rk   where 
-           hasCAt = HasCAt 
+         , KnownSymbol l ) =>  HasSome c l rk   where 
+           hasSome = HasSome
 
-type ARow = "pewps" .== Int 
-         .+ "scewps" .== (Int -> Bool)
+class Source path ~ slot => SourceOf path slot where 
+  sourceOf :: Dict (Source path ~ slot)
+  sourceOf = Dict 
 
-testHas :: forall c l rk. HasCAtC c l rk  => Proxy (rk .! l)
-testHas = Proxy 
+class Target path ~ slot => TargetOf path slot where 
+  targetOf :: Dict (Target path ~ slot)
+  targetOf = Dict 
 
-mop = testHas @Ord @"pewps" @ARow 
+instance Source path ~ slot => SourceOf path slot 
+
+instance Target path ~ slot => TargetOf path slot 
+
+targetOf' :: TargetOf path slot :- (Target path ~ slot)
+targetOf' = Sub Dict 
+
+getSome :: forall k (f :: k -> Type) l (c :: k -> Constraint)  (rk :: Row k) 
+         . KnownSymbol l
+        => HasSome' c l rk 
+        -> (forall (a :: k). c a =>  f a) 
+        -> Some c f 
+getSome HasSome f = Some $ f @(rk .! l)
+
+data ProxE :: forall k. k -> Type where 
+  ProxE :: forall k (a :: k). Top a => ProxE a 
+
+proxE :: forall k (a :: k). ProxE a 
+proxE = ProxE  
+
+newtype TopDict a = TopDict (Dict (Top a))
+
+class (HasSome (ConcretePath source slot) l (Project source)
+      , KnownSymbol l 
+      , WellBehaved (Project source)) => Compatible source slot l where 
+  unify :: TMVar (Entity source) -> STMNode slot 
+  unify tmv = STMNode $ readTMVar tmv >>= \e -> 
+    case hasSome :: HasSome' (ConcretePath source slot) l (Project source) of 
+      h@HasSome -> case  (getSome  h proxE :: Some (ConcretePath source slot) ProxE) of 
+        x -> go x e 
+   where 
+     go ::  Some (ConcretePath source slot) ProxE -> Entity source -> STM (ENode slot)
+     go x e = unSome x (go2 e)
+
+     go2 :: forall (a :: Path) (slot :: SlotData) (source :: SlotData)
+          . ConcretePath source slot a =>  Entity source -> ProxE a -> STM (ENode slot)
+     go2 e ProxE = locate' @a (chart @a) e 
+
+instance (HasSome (ConcretePath source slot) l (Project source)
+      , KnownSymbol l 
+      , WellBehaved (Project source)) => Compatible source slot l
+
+class (Compatible source (T lt) (L lt), KnownSymbol (L lt)) => Compatible' source (lt :: LT SlotData) where 
+  unify' :: TMVar (Entity source) -> STMNode (T lt)
+  unify' e = unify @source @(T lt) @(L lt) e
+
+instance (Compatible source (T lt) (L lt), KnownSymbol (L lt)) => Compatible' source (lt :: LT SlotData) 
+
+class HasType l (l ':-> k) rk => HasLTK l k rk 
+
+type Labelled :: Row k -> Row (LT k)
+type family Labelled rk = lt | lt -> rk where 
+  Labelled (R lts) = R (LabelledR lts) 
+
+type LabelledR :: [LT k] -> [LT (LT k)]
+type family LabelledR rk = lt | lt -> rk  where 
+  LabelledR '[] = '[]
+  LabelledR (l ':-> k ': lts) = (l ':-> (l ':-> k)) ': LabelledR lts 
 
 
-class ( Forall (Project source) NormalChartedLocate 
+{--
+class ( Forall (Project source) NormalCharted
       , Forall (Project source) Locate 
       , AllUniqueLabels (R.Map Proxy (Project source))
       , AllUniqueLabels (Project source)
@@ -190,7 +268,7 @@ class ( Forall (Project source) NormalChartedLocate
            . ( lt ~ (l ':= slot)
              , KnownSymbol l
              , HasType l (xs :> 'Down (l ':= slot)) (Project source)
-             , ((Project source) .! l) ~ (xs :> 'Down (l ':= slot)) 
+             , (Project source .! l) ~ (xs :> 'Down (l ':= slot)) 
              , Source xs ~ source 
              , Target (Project source .! l) ~ slot 
              ) => TMVar (Entity source)
@@ -203,11 +281,11 @@ class ( Forall (Project source) NormalChartedLocate
       myPath = withDict (mapHas @Segment' @l @(xs :> 'Down (l ':= slot)) @(Project source)) $ pathed R..! (Label @l)
 
       pathed :: Rec (R.Map Segment' (Project source))
-      pathed = R.transform @NormalChartedLocate @(Project source) @Proxy @Segment' go proxified 
+      pathed = R.transform @NormalCharted @(Project source) @Proxy @Segment' go proxified 
 
       go :: forall p. (Charted p, Normalized p) => Proxy p -> Segment' p 
       go Proxy = chart @p
-
+ --}
 
 {--
 instance ( Forall (Project source) NormalChartedLocate 
