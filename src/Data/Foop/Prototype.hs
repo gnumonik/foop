@@ -1,8 +1,8 @@
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE LiberalTypeSynonyms #-}
-module Data.Foop.Prototype where
 
+module Data.Foop.Prototype where
 
 import Data.Foop.Types
 import Data.Proxy
@@ -16,7 +16,7 @@ import Data.Constraint
 import Control.Concurrent.STM
 import qualified Data.Constraint.Forall as DC
 import Control.Comonad.Store 
-
+import Data.Row.Internal
 
 mapE :: forall k (c :: k -> Constraint) (a :: k) r r'  
             . (c a => r)
@@ -54,20 +54,17 @@ queryHandler :: forall query roots shoots state deps
 queryHandler eval = NT $ \(Q q) -> unCoyoneda (\g -> fmap g . eval) q 
 
 mkQHandler_ :: forall slot query roots shoots state 
-             . (forall x. query x -> EntityM  Empty roots shoots state query IO x)
-             -> Handler slot query Empty roots shoots state
-mkQHandler_ f = mkQHandler NoDeps (const f)   
+             . (forall x. query x -> EntityM  (R '[]) roots shoots state query IO x)
+             -> Handler slot query (R '[]) roots shoots state
+mkQHandler_ f = mkQHandler  (const f)   
 
 mkQHandler :: forall slot query deps roots shoots state  
-            . MkPaths slot deps 
-           -> (forall x. MkPaths slot deps -> query x -> EntityM  deps roots shoots state query IO x)
+            .  (forall x. Proxy deps -> query x -> EntityM  deps roots shoots state query IO x)
            -> Handler slot query deps roots shoots state 
-mkQHandler paths eval = Handler $ store (accessor eval) paths 
+mkQHandler  eval = Handler $ store (accessor ) Proxy 
   where 
-    accessor :: (forall x. MkPaths slot deps -> query x -> EntityM deps roots shoots state query IO x)
-             -> MkPaths slot deps
-             -> AlgebraQ query :~> EntityM deps roots shoots state query IO
-    accessor f' paths = NT $ \(Q q) -> unCoyoneda (\g -> fmap g . eval paths) q 
+    accessor :: Proxy deps -> AlgebraQ query :~> EntityM deps roots shoots state query IO
+    accessor p = NT $ \(Q q) -> unCoyoneda (\g -> fmap g . eval p) q 
 
 unCoyoneda :: forall (q :: Type -> Type) 
                      (a :: Type) 

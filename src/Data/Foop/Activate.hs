@@ -16,15 +16,11 @@ import Data.Constraint
 -- | Takes a prototype and constructs a root entity, which can be queries 
 --   directly from the rest of the program.
 activate :: forall surface children query deps 
-          . (SlotOrdC (Slot () surface children query))
-         => Model deps (Slot () surface children query)
+          . Model (Slot () surface children query) (Slot () surface children query)
          -> IO (Object (Slot () surface children query))
 activate (Model espec@MkSpec{..}) =  do 
-      let storage = mkStorage (Proxy @children)
-      (renderTree :: RenderTree children) <- atomically $ MkRenderTree <$> toSurface (Proxy @children) storage
       let rendered = render renderer initialState
-      (leaf :: TVar (RenderLeaf (Slot () surface children query))) <- newTVarIO (MkRenderLeaf rendered renderTree) 
-      e@(Entity tv) <- new_' espec storage rendered renderTree leaf  
+      e@(Entity tv) <- new_' espec  rendered 
       pure $ Object e 
 
 -- | Run a query against a root entity.
@@ -41,10 +37,11 @@ tell' q o = query o (mkTell q)
 request' :: Request q a -> Object (Slot () s cs q) -> IO a 
 request' q o = query o (mkRequest q)
 
+{-
 -- | Render a root entity
-observe :: Object (Slot () s cs q) -> IO (RenderLeaf (Slot () s cs q))
+observe :: Object (Slot () s cs q) -> IO (ENode (Slot () s cs q))
 observe (Object e) = atomically $ observeE e 
-
+-}
 
 
 {-- 

@@ -12,23 +12,27 @@ import qualified Data.Map as M
 import Control.Monad.State.Class
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Class
-import Data.Bifunctor ( Bifunctor(first, bimap) )
+import Data.Bifunctor ( Bifunctor(first, bimap, second) )
 import Data.Functor.Coyoneda ( Coyoneda(..), liftCoyoneda )
 import Data.Proxy
 import Control.Comonad.Store
 import Control.Concurrent.STM.TVar
 import Control.Monad.Free.Church
-import Data.Row.Internal ( Extend, Row(R), LT((:->)), FrontExtends (frontExtendsDict), FrontExtendsDict (FrontExtendsDict) )
+import Data.Row.Internal ( Extend, Row(R), LT((:->)), FrontExtends (frontExtendsDict), FrontExtendsDict (FrontExtendsDict), metamorph )
 import Data.Default
 import qualified Data.Row.Records as R
 import Data.Constraint
 import qualified Data.Constraint.Forall as DC
 import Data.Type.Equality (type (:~:))
-import Control.Concurrent.STM (TMVar, STM)
+import Control.Concurrent.STM (TMVar, STM, readTMVar)
 import Data.Functor.Constant
-import Data.Row.Dictionaries (IsA(..),As(..),ActsOn(..),As'(..), Unconstrained1)
+import Data.Row.Dictionaries (IsA(..),As(..),ActsOn(..),As'(..), Unconstrained1, mapExtendSwap, mapHas)
 import Data.Type.Equality (type (:~:)(Refl))
 import Data.Foop.Exists 
+import Unsafe.Coerce
+import Control.Monad.Identity
+import Control.Applicative
+import Data.Functor.Compose
 
 
 --- *** Finish fixing paths so start doesn't have a label (this gives us an isomorphism between paths and well-formed slotdata)
@@ -75,7 +79,7 @@ type Slot index surface roots  query = '(index,surface,ETree roots,query)
 --   key for operations over child entities. It shouldn't ever be necessary for 
 --   a user to manually construct this
 data SlotKey :: Symbol -> Row SlotData -> SlotData -> Type where
-  SlotKey :: (ChildC label roots slot, Forall roots SlotOrdC)  => SlotKey label roots slot
+  SlotKey :: (ChildC label roots slot, Forall roots (SlotI Ord), KnownSymbol label)  => SlotKey label roots slot
 
 -- | The base functor for an entity. 
 --
@@ -86,18 +90,17 @@ data SlotKey :: Symbol -> Row SlotData -> SlotData -> Type where
 --   `query` is the ADT which represents the component's algebra 
 --
 --   `m` is the inner functor (which for now will always be IO)
-type EntityF :: [LT SlotData] -> Row SlotData -> Row SlotData -> Type -> (Type -> Type) -> (Type -> Type) -> Type -> Type
+type EntityF :: Row SlotData -> Row SlotData -> Row SlotData -> Type -> (Type -> Type) -> (Type -> Type) -> Type -> Type
 data EntityF deps roots shoots state query m a where
   State   :: (state -> (a,state)) -> EntityF deps roots shoots state query m a
 
   Lift    :: m a -> EntityF deps roots shoots state query m a
-{--
-  Interact :: -- (HasType l (Segment 'Begin path) deps, KnownSymbol l)
-        --  => 
-             Label l 
-          -> (Entity (Target path) -> a)
+
+  Interact :: (HasType l slot deps, KnownSymbol l)
+           => Label l 
+          -> (ENode slot -> STM a)
           -> EntityF deps roots shoots state query m a 
---}
+
   Query    :: Coyoneda query a -> EntityF deps roots shoots state query m a
 
   GetShoot :: SlotKey l shoots slot 
@@ -111,7 +114,7 @@ data EntityF deps roots shoots state query m a where
   Create   :: SlotKey l shoots (Slot i su rs q)
            -> Label l 
            -> i
-           -> Model _loc ds (Slot i su rs q)
+           -> Model _loc  (Slot i su rs q)
            -> a 
            -> EntityF deps roots shoots state query m a
 
@@ -124,7 +127,7 @@ instance Functor m => Functor (EntityF deps roots shoots state query m) where
   fmap f =  \case
         State k                  -> State (first f . k)
         Lift ma                  -> Lift (f <$> ma)
-   --     Interact path g          -> Interact path (fmap f g) 
+        Interact l g             -> Interact l (fmap f <$> g)
         Query qb                 -> Query $ fmap f qb
         GetShoot key g           -> GetShoot key $ fmap f g -- (goChild f key g)
         GetRoot key g            -> GetRoot key (fmap f g)
@@ -141,7 +144,7 @@ instance Functor m => Functor (EntityF deps roots shoots state query m) where
 --   `query` is the ADT which represents the entity's algebra 
 --
 --   `m` is the inner functor (which for now will always be IO)
-type EntityM :: [LT SlotData] -> Row SlotData -> Row SlotData -> Type -> (Type -> Type) -> (Type -> Type) -> Type -> Type 
+type EntityM :: Row SlotData -> Row SlotData -> Row SlotData -> Type -> (Type -> Type) -> (Type -> Type) -> Type -> Type 
 newtype EntityM deps roots shoots state query m a = EntityM (F (EntityF deps roots shoots state query m) a) 
   deriving (Functor, Applicative, Monad)
 
@@ -154,7 +157,12 @@ instance  MonadIO m => MonadIO (EntityM deps roots shoots s q m) where
 instance MonadTrans (EntityM deps roots shoots s q ) where
   lift = EntityM . liftF . Lift
 
+-- for readable partial application 
+class a ~ b => Is a b where 
+  is :: Dict (a ~ b)
+  is = Dict 
 
+instance a ~ b => Is a b 
 
 -- use the fancy exists constraints if type inference doesn't work here 
 data ETree :: Row SlotData -> Type where 
@@ -163,8 +171,8 @@ data ETree :: Row SlotData -> Type where
 
 data ENode :: SlotData -> Type where 
   ENode :: Entity (Slot i su rs q)
-        -> ETree rs 
-        -> EBranch ss 
+      --  -> ETree rs 
+      --  -> EBranch ss 
         -> ENode (Slot i su rs q)
 
 data EBranch :: Row SlotData -> Type where 
@@ -172,8 +180,10 @@ data EBranch :: Row SlotData -> Type where
           -> EBranch ss 
 
 data ELeaf :: SlotData -> Type where 
-  ELeaf :: M.Map (Indexed (Slot i su rs q)) (Entity (Slot i su rs q))
-        -> ELeaf (Slot i su rs q)
+  ELeaf :: forall slot 
+         . SlotI Ord slot 
+        => M.Map (Index slot) (Entity slot)
+        -> ELeaf slot
 
 -- | `~>` is a type synonym for natural transformations (generally between functors
 --   but that constraint can't be expressed here).
@@ -205,20 +215,19 @@ class Forall ks c => All c ks where
   allC = Dict 
 instance Forall ks c => All c ks  
 
-
-
-data Model :: SlotData -> [LT SlotData]  -> SlotData -> Type where 
+data Model :: SlotData -> SlotData -> Type where 
   Model :: forall surface roots shoots query state deps i loc 
          . (SlotConstraint roots)
         => Spec loc deps shoots state (Slot i surface roots query)
-        -> Model loc deps (Slot i surface roots query)
+        -> Model loc  (Slot i surface roots query)
 
-type family UnModel (models :: Row Type) :: (Row SlotData) where
-  UnModel  (R lts) = R (UnModelR lts) 
+data Models :: SlotData -> Row SlotData -> Type where 
+  MkModels :: Rec (R.Map (Model source) models)
+           -> Models source models 
 
-type family UnModelR (models :: [LT Type]) :: [LT SlotData] where 
-  UnModelR '[] = '[]
-  UnModelR (l ':-> Model _loc deps slot ': rest) = (l ':-> slot ': UnModelR rest)
+
+
+ 
          
 -- going to have to "lift" the constraints somehow 
 -- all roots and shoots have to be compatible with whatever the path 
@@ -228,19 +237,27 @@ type family UnModelR (models :: [LT Type]) :: [LT SlotData] where
 
 
 -- | A `Spec` is the GADT from which an Entity is constructed. 
-type Spec :: SlotData -> [LT SlotData] -> Row SlotData -> Type -> SlotData -> Type 
-data Spec loc deps shoots state slot where
-  MkSpec :: forall state query (deps :: [LT SlotData]) surface roots shoots i loc.
+type Spec :: SlotData -> Row SlotData -> Row SlotData -> Type -> SlotData -> Type 
+data Spec source deps shoots state slot where
+  MkSpec :: forall state query (deps :: Row SlotData) surface roots shoots i source
+          . ( Compat source deps
+            , Forall shoots (SlotI Ord)
+            , Forall roots (SlotI Ord)
+            , WellBehaved shoots 
+            , WellBehaved roots
+            , WellBehaved (R.Map Proxy shoots)
+            , SlotOrd (Slot i surface roots query)
+            , Forall (R.Map Proxy shoots) Default 
+            , Ord i)=>
     { initialState   :: state 
     , handleQuery    :: Handler (Slot i surface roots query) query deps roots shoots state
     , renderer       :: Renderer state surface 
     , shoots         :: Proxy shoots 
-    , roots          :: Proxy roots 
-    , dependencies   :: Proxy (deps :: [LT SlotData])
-    } -> Spec loc deps shoots state (Slot i surface roots query)
+    , roots          :: Models source roots 
+    , dependencies   :: Proxy (deps :: Row SlotData)
+    } -> Spec source deps shoots state (Slot i surface roots query)
 
 class All (Exists (Extends loc) (Segment 'Begin)) roots => ExtendAll loc roots 
-
     
 type InitPath (slot :: SlotData) = ('Begin :> 'Start slot) 
 
@@ -253,21 +270,20 @@ newtype AlgebraQ query a =  Q (Coyoneda query a)
 
 -- | Evaluation State. Holds the Prototype Spec, the Prototype's State, 
 --   and a Context which can be read from inside the Prototype monad 
-type EvalState :: [LT SlotData] -> Row SlotData -> Row SlotData -> Type -> Type -> (Type -> Type) -> Type
+type EvalState :: Row SlotData -> Row SlotData -> Row SlotData -> Type -> Type -> (Type -> Type) -> Type
 data EvalState    deps roots shoots surface st q where 
-  EvalState :: (SlotConstraint shoots) => {
+  EvalState ::  {
       _entity      :: Spec loc deps shoots st (Slot i surface roots q)
     , _state       :: st
     , _shoots      :: EBranch shoots 
     , _roots       :: ETree roots
     , _surface     :: surface 
-    , _environment :: Proxy deps-- AnAtlasOf deps
+    , _environment :: Rec (R.Map STMNode deps) -- AnAtlasOf deps
     } -> EvalState  deps roots shoots surface st q 
  
 -- | Existential wrapper over the EvalState record. 
-data ExEvalState :: [LT SlotData] -> Row SlotData -> Row SlotData -> Type -> (Type -> Type) -> Type where
-  ExEvalState :: ( SlotConstraint slots) 
-              => EvalState deps roots shoots surface st query 
+data ExEvalState :: Row SlotData -> Row SlotData -> Row SlotData -> Type -> (Type -> Type) -> Type where
+  ExEvalState :: EvalState deps roots shoots surface st query 
               -> ExEvalState deps roots shoots surface query  
 
 -- | `Transformer surface query` is a newtype wrapper over `forall x. query x -> IO (x,ExEvalState surface query)`
@@ -293,7 +309,7 @@ data Transformer deps roots shoots surface query  where
 --   functionality *combined* with comonad-functionality: We can extract the state. 
 -- 
 --   But mainly this is what it is because Store is my favorite comonad and I jump at any chance to use it :) 
-type EntityStore ::  [LT SlotData] -> Row SlotData -> Row SlotData -> Type -> (Type -> Type) -> Type 
+type EntityStore ::  Row SlotData -> Row SlotData -> Row SlotData -> Type -> (Type -> Type) -> Type 
 type EntityStore deps roots shoots surface  query 
   = Store (ExEvalState deps roots shoots surface  query) (Transformer deps roots shoots surface query)
 
@@ -301,8 +317,7 @@ type EntityStore deps roots shoots surface  query
 --   Mainly for making type signatures easier.
 type Entity :: SlotData -> Type 
 data Entity slot where 
-  Entity :: (SlotOrdC (Slot i su rs q)) 
-         => TVar (EntityStore deps rs ss su q) -> Entity (Slot i su rs q)
+  Entity :: Ord i => TVar (EntityStore deps rs ss su q) -> Entity (Slot i su rs q)
 
 -- | `Tell query` ==  `() -> query ()` 
 type Tell query = () -> query ()
@@ -319,61 +334,16 @@ data Object slot where
 -- Families and constraints 
 ---------------------------
 
-type IndexOf :: SlotData -> Type
-type family IndexOf slotData where 
-  IndexOf (Slot i s rs q) = i
-
-unIndexed :: Indexed '(i,su,rs,q)
-          -> i 
-unIndexed (Indexed Index i) = i 
-
-data Index :: SlotData -> Type -> Type where 
-  Index :: Ord i => Index (Slot i su rs q) i 
-
-instance Show i => Show (Indexed (Slot i su rs q)) where 
-  show (Indexed Index i) = show i 
-
-data Indexed :: SlotData ->  Type where 
-  Indexed :: Index slot i -> i -> Indexed slot  
-
-instance Eq (Indexed slot) where 
-  (Indexed Index i) == (Indexed Index i') = i == i' 
-
-instance Ord (Indexed slot ) where 
-  (Indexed Index i) <= (Indexed Index i') = i <= i' 
-
-type Index' :: SlotData -> Type 
-type family Index' slotData where 
-  Index' (Slot i su rs q) = Index (Slot i su rs q) i
-
-newtype StorageBox :: SlotData -> Type where 
-  MkStorageBox :: M.Map (Indexed slot) (Entity slot) 
-               -> StorageBox slot
-
--- | Constructs a storage record from a row of slotdata.
-type MkStorage :: Row SlotData -> Row Type
-type family MkStorage slotData  where
-  MkStorage slotData = R.Map StorageBox slotData 
-
-type family SlotC (slot :: SlotData) :: Constraint where 
-  SlotC '(i,s,ETree cs,q) = (Ord i, Forall cs SlotOrdC)
-
-class (SlotC slot, Ord (IndexOf slot))  => SlotOrdC slot where 
-  slotOrd :: Dict (Ord (IndexOf slot))
-  slotOrd = Dict 
-
-instance (SlotC slot, Ord (IndexOf slot)) => SlotOrdC slot 
-
 -- | Compound constraint which a child entity must satisfy. You should probably just look at the source.
 type ChildC :: Symbol -> Row SlotData -> SlotData -> Constraint
 type family ChildC label slots slot where
   ChildC label slots slot 
       = ( HasType label slot slots   
-        , Forall slots SlotOrdC
-        , SlotOrdC slot 
+        , Forall slots (SlotI Ord)
+        , SlotI Ord slot 
         , KnownSymbol label)
 
-type SlotConstraint slots = ( Forall slots SlotOrdC 
+type SlotConstraint slots = ( Forall slots (SlotI Ord)
                             , WellBehaved slots 
                             , AllUniqueLabels (R.Map Proxy slots)
                             , Forall (R.Map Proxy slots) Default)
@@ -382,14 +352,6 @@ type SlotConstraint slots = ( Forall slots SlotOrdC
 
 data (:=) a b = a := b deriving (Show, Eq)
 infixr 8 := 
-
-data MkPaths ::  SlotData -> Row Type -> Type where 
-  MkPaths :: forall  slot paths 
-           .  -- AllRooted slot paths => 
-              Rec paths 
-           -> MkPaths slot paths  
-
-  NoDeps :: forall slot. MkPaths slot Empty  
 
 data Dir a b
   = Up (a := b) 
@@ -420,8 +382,8 @@ data Segment' :: Path -> Type where
   ChildA' :: forall l l' i su rs ss q i' su' rs' ss' q' old 
          . ( KnownSymbol l'
          ,   HasType l' (Slot i' su' rs' q') rs 
-         ,   Locate ('Begin :> Start (Slot i su rs q))
-         ,   Locate ('Begin :> Start (Slot i su rs q) :> Down (l' ':= Slot i' su' rs' q'))
+   --      ,   Locate ('Begin :> Start (Slot i su rs q))
+    --     ,   Locate ('Begin :> Start (Slot i su rs q) :> Down (l' ':= Slot i' su' rs' q'))
          ) => SlotKey l' rs (Slot i' su' rs' q')  
            -> Segment' ('Begin :> Start (Slot i su rs q))
            -> Segment' ('Begin :> Start (Slot i su rs q) :> Down (l' ':= Slot i' su' rs' q'))
@@ -439,11 +401,6 @@ data Segment' :: Path -> Type where
 class Locate (path :: Path) where 
   locate :: Segment' path -> Entity (Source path) -> STM (ENode (Target path))
 
-locate' :: forall path. Segment' path -> Entity (Source path) -> STM (ENode (Target path))
-locate' seg e = case seg of 
-  h@Here' -> locate h e 
-  ca@(ChildA' _ _) -> locate ca e 
-  cb@(ChildB' _ _) -> locate cb e
 
 
 -- | Appends two paths 
@@ -511,8 +468,8 @@ instance ( KnownSymbol l'
          , Normalizes ('Begin :> Start (Slot i su rs q))
          , HasType l' (Slot i' su' rs' q') rs 
          , Ord i'
-         , Forall rs SlotOrdC 
-         , Forall rs' SlotOrdC 
+         , Forall rs (SlotI Ord) 
+         , Forall rs' (SlotI Ord) 
          , Locate (Normalize ('Begin :> Start (Slot i su rs q) :> 'Down (l' ':= Slot i' su' rs' q')) )
          )
        => Normalizes ('Begin :> Start (Slot i su rs q) :> 'Down (l' ':= Slot i' su' rs' q')) where 
@@ -524,8 +481,8 @@ instance ( KnownSymbol l'
          , Normalize(old :> Down (l ':= Slot i su rs q)) ~ (Normalize old :> Down (l ':= Slot i su rs q))
          , HasType l' (Slot a b c d) rs 
          , Ord a
-         , Forall rs SlotOrdC 
-         , Forall c SlotOrdC 
+         , Forall rs (SlotI Ord) 
+         , Forall c (SlotI Ord) 
          , Locate (Normalize (old :> Down (l ':= Slot i su rs q) :> 'Down (l' ':= Slot a b c d)) )
          )
        => Normalizes (old :> Down (l ':= Slot i su rs q) :> 'Down (l' ':= Slot a b c d)) where 
@@ -575,8 +532,8 @@ instance ( KnownSymbol l
          , Charted ('Begin :> Start (Slot i su rs q))
          , HasType l' (Slot i' su' rs' q') rs 
          , Ord i'
-         , Forall rs SlotOrdC 
-         , Forall rs' SlotOrdC 
+         , Forall rs (SlotI Ord) 
+         , Forall rs' (SlotI Ord) 
          , Locate ('Begin :> Start (Slot i su rs q) :> 'Down (l' ':= Slot i' su' rs' q'))
          ) => Charted ('Begin :> Start (Slot i su rs q) :> 'Down (l' ':= Slot i' su' rs' q')) where 
         chart = ChildA' SlotKey Here' 
@@ -588,8 +545,8 @@ instance ( KnownSymbol l'
          , Normalize (old :> Down (l ':= Slot i su rs q)) ~ (Normalize old :> Down (l ':= Slot i su rs q))
          , HasType l' (Slot i' su' rs' q') rs 
          , Ord i'
-         , Forall rs SlotOrdC 
-         , Forall rs' SlotOrdC 
+         , Forall rs (SlotI Ord) 
+         , Forall rs' (SlotI Ord) 
          , Locate  ((Normalize old ':> 'Down (l ':= Slot i su rs q))  ':> 'Down (l' ':= Slot i' su' rs' q'))
          , Locate (old :> Down (l ':= Slot i su rs q) :> 'Down (l' ':= Slot i' su' rs' q'))
          )
@@ -616,7 +573,6 @@ instance ( Charted old
          , Normalizes  (old :> Down _any1 :> 'Up up1 :> 'Up up2))
       => Charted (old :> Down _any1 :> 'Up up1 :> 'Up up2) where 
         chart = chart @old
-
 
 type Extension parent child = Normalize (Connect parent child)
 
@@ -703,6 +659,16 @@ type family (<>) (xs :: [k]) (ys :: [k]) :: [k] where
   '[] <> ys  = ys 
   xs  <> '[] = xs 
   (x ': xs) <>  ys = x ': (xs <> ys) 
+
+data Index :: SlotData -> Type where 
+  Ix :: forall i slot su cs q. (slot ~ Slot i su cs q, Ord i) => i -> Index slot 
+
+instance Eq (Index (Slot i su cs q)) where 
+  (Ix i) == (Ix i') = i == i' 
+
+instance Ord (Index (Slot i su cs q)) where 
+  (Ix i) <= (Ix i') = i <= i' 
+
 
 {--
 first we make proxies 
@@ -811,6 +777,9 @@ data SlotHas :: (Type -> Constraint) -> (Type -> Constraint) -> (Row SlotData ->
              , cQ q
            ) => SlotHas cI cS cR cQ slot 
 
+class SlotHasC Ord Top (All SlotOrd) Top slot => SlotOrd slot 
+instance SlotHasC Ord Top (All SlotOrd) Top slot => SlotOrd slot 
+
 type SlotHasC :: (Type -> Constraint) -> (Type -> Constraint) -> (Row SlotData -> Constraint) -> ((Type -> Type) -> Constraint) -> SlotData -> Constraint 
 class SlotHasC cI cS cR cQ slot where
   slotted :: Slotted cI cS cR cQ slot 
@@ -849,5 +818,262 @@ class SlotHasC Top Top Top cQ slot => SlotQ cQ slot where
     SlotHas -> Dict  
 
 instance SlotHasC Top Top Top cQ slot => SlotQ cQ slot 
+
+
+newtype STMNode :: SlotData -> Type where 
+  STMNode :: STM (ENode slot) -> STMNode slot    
+
+class (Charted p, Normalized p, SourceOf p source, TargetOf p target) => ConcretePath source target p where 
+  concretePath :: Dict (Charted p, Normalized p, SourceOf p source, TargetOf p target)
+  concretePath = Dict 
+
+instance (Charted p, Normalized p, SourceOf p source, TargetOf p target) => ConcretePath source target p
+
+type family L (lt :: LT SlotData) :: Symbol where 
+  L (l ':-> t) = l
+
+type family T (lt :: LT SlotData) :: SlotData where 
+  T (l ':-> t) = t
+ 
+data HasSome' :: (k -> Constraint) -> Symbol -> Row k -> Type where 
+  HasSome :: forall k (c :: k -> Constraint) (rk :: Row k) (l :: Symbol) 
+          . ( WellBehaved rk 
+            , KnownSymbol l 
+            , HasType l (rk .! l) rk 
+            , c (rk .! l)) => HasSome' c l rk 
+
+data Some :: (k -> Constraint) -> (k -> Type) -> Type where 
+  Some :: forall k (c :: k -> Constraint) (f :: k -> Type) (a :: k)
+        . c a => f a -> Some c f 
+
+unSome :: Some c f -> (forall a. c a => f a -> r) -> r 
+unSome (Some a) f = f a 
+   
+withSome :: forall k (c :: k -> Constraint) (l :: Symbol) (rk :: Row k) r. HasSome c l rk => (forall (x :: k). c x => r) -> r 
+withSome f = case (hasSome :: HasSome' c l rk) of 
+  HasSome -> f @(rk .! l)
+
+withSome' :: forall k (c :: k -> Constraint) (l :: Symbol) (rk :: Row k) r. HasSome' c l rk -> (forall (x :: k). c x => r) -> r 
+withSome' h f = case h of 
+  HasSome -> f @(rk .! l)
+
+class HasSome (c :: k -> Constraint) (l :: Symbol) (rk :: Row k)  where 
+  hasSome :: HasSome' c l rk 
+
+instance ( HasType l (rk .! l) rk
+         , c (rk .! l) 
+         , WellBehaved rk 
+         , KnownSymbol l ) =>  HasSome c l rk   where 
+           hasSome = HasSome
+
+class Source path ~ slot => SourceOf path slot where 
+  sourceOf :: Dict (Source path ~ slot)
+  sourceOf = Dict 
+
+class Target path ~ slot => TargetOf path slot where 
+  targetOf :: Dict (Target path ~ slot)
+  targetOf = Dict 
+
+instance Source path ~ slot => SourceOf path slot 
+
+instance Target path ~ slot => TargetOf path slot 
+
+targetOf' :: TargetOf path slot :- (Target path ~ slot)
+targetOf' = Sub Dict 
+
+getSome :: forall k (f :: k -> Type) l (c :: k -> Constraint)  (rk :: Row k) 
+         . KnownSymbol l
+        => HasSome' c l rk 
+        -> (forall (a :: k). c a =>  f a) 
+        -> Some c f 
+getSome HasSome f = Some $ f @(rk .! l)
+
+data ProxE :: forall k. k -> Type where 
+  ProxE :: forall k (a :: k). Top a => ProxE a 
+
+proxE :: forall k (a :: k). ProxE a 
+proxE = ProxE  
+
+newtype TopDict a = TopDict (Dict (Top a))
+
+class (HasSome (ConcretePath source slot) l (Project source)
+      , KnownSymbol l 
+      , WellBehaved (Project source)) => Compatible source l slot where 
+  unify :: TMVar (Entity source) -> STMNode slot 
+  unify tmv = STMNode $ readTMVar tmv >>= \e -> 
+    case hasSome :: HasSome' (ConcretePath source slot) l (Project source) of 
+      h@HasSome -> case  (getSome  h proxE :: Some (ConcretePath source slot) ProxE) of 
+        x -> go x e 
+   where 
+     go ::  Some (ConcretePath source slot) ProxE -> Entity source -> STM (ENode slot)
+     go x e = unSome x (go2 e)
+
+     go2 :: forall (a :: Path) (slot :: SlotData) (source :: SlotData)
+          . ConcretePath source slot a =>  Entity source -> ProxE a -> STM (ENode slot)
+     go2 e ProxE = locate @a (chart @a) e 
+
+instance (HasSome (ConcretePath source slot) l (Project source)
+      , KnownSymbol l 
+      , WellBehaved (Project source)) => Compatible source l slot
+
+
+class HasType l (l ':-> k) rk => HasLTK l k rk 
+
+type ExtendLT :: Row k -> Row (LT k)
+type family ExtendLT rk = lt | lt -> rk  where 
+  ExtendLT (R lts) = R (ExtendLTR lts) 
+
+type ExtendLTR :: [LT k] -> [LT (LT k)]
+type family ExtendLTR rk = lt | lt -> rk  where 
+  ExtendLTR '[] = '[]
+  ExtendLTR (l ':-> k ': lts) = (l ':-> (l ':-> k)) ': ExtendLTR lts 
+
+type RetractLT :: Row (LT k) -> Row k 
+type family RetractLT lt = rk | rk -> lt where 
+  RetractLT (R lts) = R (RetractLTR lts)
+
+type RetractLTR :: [LT (LT k)] -> [LT k] 
+type family RetractLTR lt = rk | rk -> lt where 
+  RetractLTR '[] = '[]
+  RetractLTR (l ':-> (l ':-> k) ': lts) = l ':-> k ': RetractLTR lts 
+
+class ExtendLT rk ~ lt => ExtendsLT rk lt | lt -> rk where 
+  extendLT :: Dict (ExtendLT rk ~ lt) 
+  extendLT = Dict 
+
+instance ExtendLT rk ~ lt => ExtendsLT rk lt 
+
+class RetractLT lt ~ rk => RetractsLT lt rk | rk -> lt where 
+  retractLT :: Dict (RetractLT lt ~ rk)
+  retractLT = Dict 
+
+instance RetractLT lt ~ rk => RetractsLT lt rk 
+
+class ( ExtendsLT (rk :: Row k) (lt :: Row (LT k))
+      , RetractsLT lt rk) => 
+    LTSOf (rk :: Row k) (lt :: Row (LT k)) where 
+  ltsOf :: forall (l :: Symbol) (t :: k) 
+         .  HasType l t rk :- HasType l (l ':-> t) lt 
+  ltsOf = Sub (unsafeCoerce (Dict :: Dict (HasType l t rk))) 
+
+
+instance (ExtendsLT (rk :: Row k) (lt :: Row (LT k)), RetractsLT lt rk) => LTSOf (rk :: Row k) (lt :: Row (LT k))
+
+mkProxy :: forall slots. ( AllUniqueLabels slots
+         , AllUniqueLabels (R.Map Proxy slots)
+         , Forall (R.Map Proxy slots) Default
+         ) => Proxy slots 
+           -> Rec (R.Map Proxy slots)
+mkProxy Proxy = R.default' @Default def
+
+
+
+hasType :: forall l t r. HasType l t r :- ((r .! l) ~ t) 
+hasType  = Sub Dict 
+
+
+
+-- | This is the same as @(lazyRemove l r, r .! l)@.
+lazyUncons :: KnownSymbol l => Label l -> Rec r -> (Rec (r .- l), r .! l)
+lazyUncons l r = (R.lazyRemove l r, r .! l)
+
+
+
+class HasType l t r => HasTypeAt r t l where 
+  hasType' :: Dict (HasType l t r)
+  hasType' = Dict 
+
+instance HasType l t r => HasTypeAt r t l   
+
+
+class ForallL (r :: Row k) (c :: Symbol -> k -> Constraint) -- (c' :: Symbol -> Constraint) 
+  where
+  -- | A metamorphism is an anamorphism (an unfold) followed by a catamorphism (a fold).
+  -- The parameter 'p' describes the output of the unfold and the input of the fold.
+  -- For records, @p = (,)@, because every entry in the row will unfold to a value paired
+  -- with the rest of the record.
+  -- For variants, @p = Either@, because there will either be a value or future types to
+  -- explore.
+  -- 'Const' can be useful when the types in the row are unnecessary.
+  metamorphL :: forall (p :: Type -> Type -> Type) (f :: Row k -> Type) (g :: Row k -> Type) (h :: k -> Type). Bifunctor p
+            => Proxy (Proxy h, Proxy p)
+            -> (f Empty -> g Empty)
+               -- ^ The way to transform the empty element
+            -> (forall ℓ τ ρ. (KnownSymbol ℓ, c ℓ τ, HasType ℓ τ ρ)
+               => Label ℓ -> f ρ -> p (f (ρ .- ℓ)) (h τ))
+               -- ^ The unfold
+            -> (forall ℓ τ ρ. (KnownSymbol ℓ, c ℓ τ, FrontExtends ℓ τ ρ, AllUniqueLabels (Extend ℓ τ ρ))
+               => Label ℓ -> p (g ρ) (h τ) -> g (Extend ℓ τ ρ))
+               -- ^ The fold
+            -> f r  -- ^ The input structure
+            -> g r
+
+instance ForallL (R '[]) c  where
+  {-# INLINE metamorphL #-}
+  metamorphL _ empty _ _ = empty
+
+instance (KnownSymbol ℓ, c ℓ τ, ForallL ('R ρ) c, FrontExtends ℓ τ ('R ρ), AllUniqueLabels (Extend ℓ τ ('R ρ))) => ForallL ('R (ℓ :-> τ ': ρ) :: Row k) c where
+  {-# INLINE metamorphL #-}
+  metamorphL h empty uncons cons = case frontExtendsDict @ℓ @τ @('R ρ) of
+    FrontExtendsDict Dict ->
+      cons (Label @ℓ) . first (metamorphL @_ @('R ρ) @c h empty uncons cons) . uncons (Label @ℓ)
+
+
+newtype RMap (f :: Type -> Type) (ρ :: Row Type) = RMap { unRMap :: Rec (R.Map f ρ) }
+newtype RMap2 (f :: Type -> Type) (g :: Type -> Type) (ρ :: Row Type) = RMap2 { unRMap2 :: Rec (R.Map f (R.Map g ρ)) }
+
+newtype RMapK  (f :: k -> Type) (ρ :: Row k) = RMapK { unRMapK :: Rec (R.Map f ρ) }
+newtype RMap2K (f :: Type -> Type) (g :: k -> Type) (ρ :: Row k) = RMap2K { unRMap2K :: Rec (R.Map f (R.Map g ρ)) }
+
+class ( ForallL deps (Compatible source)
+      , Forall (R.Map Proxy deps) Default
+      , WellBehaved deps 
+      , WellBehaved (R.Map Proxy deps)
+      ) => Compat source deps where 
+  compat :: TMVar (Entity source) -> Rec (R.Map STMNode deps) 
+  compat tmv = transformWithLabels @SlotData @(Compatible source) @deps @Proxy @STMNode go (mkProxy (Proxy @deps)) 
+    where 
+      go :: forall (l :: Symbol) (s :: SlotData)
+          . (KnownSymbol l)
+         => Dict (Compatible source l s) 
+         -> Proxy s 
+         -> STMNode s 
+      go Dict Proxy = unify @source @l @s tmv  
+
+instance ( ForallL deps (Compatible source)
+      , Forall (R.Map Proxy deps) Default
+      , WellBehaved deps 
+      , WellBehaved (R.Map Proxy deps)
+      ) => Compat source deps 
+
+-- | A function to map over a record given a constraint.
+mapWithLabels :: forall c f r. ForallL r c => (forall l a. (KnownSymbol l, c l a) => a -> f a) -> Rec r -> Rec (R.Map f r)
+mapWithLabels f = unRMap . metamorphL @_ @r @c @(,) @Rec @(RMap f) @f Proxy doNil doUncons doCons
+  where
+    doNil _ = RMap R.empty
+    doUncons :: forall ℓ τ ρ. (KnownSymbol ℓ, c ℓ τ, HasType ℓ τ ρ)
+             => Label ℓ -> Rec ρ -> (Rec (ρ .- ℓ), f τ)
+    doUncons l = second (f @ℓ). lazyUncons l
+    doCons :: forall ℓ τ ρ. (KnownSymbol ℓ, c ℓ τ)
+           => Label ℓ -> (RMap f ρ, f τ) -> RMap f (Extend ℓ τ ρ)
+    doCons l (RMap r, v) = RMap (R.extend l v r)
+      \\ mapExtendSwap @f @ℓ @τ @ρ
+
+transformWithLabels :: forall k c r (f :: k -> Type) (g :: k -> Type)
+                     . ForallL r c
+                    => (forall l a. (KnownSymbol l) => Dict (c l a) -> f a -> g a) 
+                    -> Rec (R.Map f r) 
+                    -> Rec (R.Map g r)
+transformWithLabels f = unRMapK . metamorphL @_ @r @c @(,) @(RMapK f) @(RMapK g) @f Proxy doNil doUncons doCons . RMapK
+  where
+    doNil _ = RMapK R.empty
+    doUncons :: forall ℓ τ ρ. (KnownSymbol ℓ, c ℓ τ, HasType ℓ τ ρ)
+             => Label ℓ -> RMapK f ρ -> (RMapK f (ρ .- ℓ), f τ)
+    doUncons l (RMapK r) = first RMapK $ lazyUncons l r
+      \\ mapHas @f @ℓ @τ @ρ
+    doCons :: forall ℓ τ ρ. (KnownSymbol ℓ, c ℓ τ)
+           => Label ℓ -> (RMapK g ρ, f τ) -> RMapK g (Extend ℓ τ ρ)
+    doCons l (RMapK r, v) = RMapK (R.extend l (f (Dict :: Dict (c ℓ τ)) v) r)
+      \\ mapExtendSwap @g @ℓ @τ @ρ
 
 

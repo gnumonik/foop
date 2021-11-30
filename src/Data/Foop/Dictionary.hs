@@ -14,15 +14,10 @@ deriveHas SlotKey
     (mapDict weaken1 $ mapDict (mapHas @f @label @slot @slots) (Dict @((slots .! label) ~ slot)))
     Dict
 
-storeHas :: forall label slots slot
-          . ( HasType label slot slots 
-          --  , SlotC (slots .! label),
-            ,  R.Forall slots SlotOrdC,
-              Ord (IndexOf (slots .! label)),
-              R.KnownSymbol label) 
-         =>   Dict (HasType  label (StorageBox (slots .! label)) (R.Map StorageBox slots))
-storeHas  = withDict
-    (mapDict weaken1 $ mapDict (mapHas @StorageBox @label @slot @slots) (Dict @((slots .! label) ~ slot)))
+deriveHas' :: forall f label slots slot 
+            . HasType label slot slots => Dict (HasType label (f slot) (R.Map f slots))
+deriveHas'  = withDict
+    (mapDict weaken1 $ mapDict (mapHas @f @label @slot @slots) (Dict @((slots .! label) ~ slot)))
     Dict
 
 {--

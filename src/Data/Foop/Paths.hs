@@ -1,5 +1,6 @@
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE TypeFamilyDependencies #-}
+{-# LANGUAGE RecordWildCards #-}
 module Data.Foop.Paths where
 
 
@@ -21,7 +22,7 @@ import GHC.Base
 import Data.Proxy
 import Data.Default
 import Data.Constraint 
-
+import Unsafe.Coerce
 
 data RootOf :: Path -> Type where 
   RootOf :: forall root parent  
@@ -32,17 +33,93 @@ data RootOf :: Path -> Type where
 mkENode :: Entity slot -> ENode slot 
 mkENode = undefined 
 
+{- 
+
+• Could not deduce: (Map ENode rs2 .! l)
+                    ~ ENode '(i, s, ETree rs, q)
+  from the context: ((('Begin ':> 'Start (Slot i_ s_ rs' q_))
+                      ':> 'Down (l ':= Slot i s rs q))
+                     ~ (('Begin ':> 'Start (Slot i1 su rs1 q1))
+                        ':> 'Down (l' ':= Slot i' su' rs'1 q')),
+                     KnownSymbol l', HasType l' (Slot i' su' rs'1 q') rs1,
+                     Locate ('Begin ':> 'Start (Slot i1 su rs1 q1)),
+                     Locate
+                       (('Begin ':> 'Start (Slot i1 su rs1 q1))
+                        ':> 'Down (l' ':= Slot i' su' rs'1 q')))
+    bound by a pattern with constructor:
+               ChildA' :: forall k1 k2 k3 k4 (l :: k1) (l' :: Symbol) i su
+                                 (rs :: Row SlotData) (ss :: k2) (q :: Type -> Type) i' su'
+                                 (rs' :: Row SlotData) (ss' :: k3) (q' :: Type -> Type) (old :: k4).
+                          (KnownSymbol l', HasType l' (Slot i' su' rs' q') rs,
+                           Locate ('Begin ':> 'Start (Slot i su rs q)),
+                           Locate
+                             (('Begin ':> 'Start (Slot i su rs q))
+                              ':> 'Down (l' ':= Slot i' su' rs' q'))) =>
+                          SlotKey l' rs (Slot i' su' rs' q')
+                          -> Segment' ('Begin ':> 'Start (Slot i su rs q))
+                          -> Segment'
+                               (('Begin ':> 'Start (Slot i su rs q))
+                                ':> 'Down (l' ':= Slot i' su' rs' q')),
+             in an equation for ‘locate’
+    at /home/gsh/code/haskell/foop/src/Data/Foop/Paths.hs:44:11-33
+  or from: HasType l (ENode (Slot i s rs q)) (Map ENode rs')
+    bound by a type expected by the context:
+               HasType l (ENode (Slot i s rs q)) (Map ENode rs') =>
+               STM (ENode '(i, s, ETree rs, q))
+    at /home/gsh/code/haskell/foop/src/Data/Foop/Paths.hs:45:68-95
+• In the second argument of ‘($)’, namely ‘roots .! (Label @l)’
+  In the second argument of ‘($)’, namely
+    ‘pure $ roots .! (Label @l)’
+  In the expression:
+    withDict (deriveHas @ENode key) $ pure $ roots .! (Label @l)
+• Relevant bindings include
+    roots :: Rec (Map ENode rs2)
+      (bound at /home/gsh/code/haskell/foop/src/Data/Foop/Paths.hs:45:21)
+    e :: Entity
+           (Source
+              (('Begin ':> 'Start (Slot i_ s_ rs' q_))
+               ':> 'Down (l ':= Slot i s rs q)))
+      (bound at /home/gsh/code/haskell/foop/src/Data/Foop/Paths.hs:44:36)
+    locate :: Segment'
+                (('Begin ':> 'Start (Slot i_ s_ rs' q_))
+                 ':> 'Down (l ':= Slot i s rs q))
+              -> Entity
+                   (Source
+                      (('Begin ':> 'Start (Slot i_ s_ rs' q_))
+                       ':> 'Down (l ':= Slot i s rs q)))
+              -> STM
+                   (ENode
+                      (Target
+                         (('Begin ':> 'Start (Slot i_ s_ rs' q_))
+                          ':> 'Down (l ':= Slot i s rs q))))
+      (bound at /home/gsh/code/haskell/foop/src/Data/Foop/Paths.hs:44:3)
+
+-}
+
+popRoots :: Entity (Slot i su rs q) -> STM (ETree rs) 
+popRoots (Entity e) = readTVar e >>= \t-> case pos t of 
+  ExEvalState (EvalState _ _ _ roots _ _) -> pure roots 
+
 instance Locate ('Begin ':> 'Start (Slot i s rs q)) where 
   locate Here' e = pure $ mkENode e 
 
-instance Locate ('Begin :> 'Start ( Slot i_ s_ rs' q_) :> 'Down (l ':= Slot i s rs q)) where 
+instance (rs .! l) ~ (Slot i' s' rs' q') =>  Locate ('Begin :> 'Start ( Slot i s rs q) :> 'Down (l ':= Slot i' s' rs' q')) where 
   locate (ChildA' key@SlotKey old) e = locate old e >>= \case 
-    (ENode _ (ETree roots) _) -> withDict (deriveHas @ENode key) $ pure $ roots R..! (Label @l)
+    en@(ENode e'  :: ENode (Slot i s rs q)) -> case deriveHas @ENode key of 
+      d@Dict -> go d en 
+   where 
+      go :: Dict (HasType l (ENode (Slot i' s' rs' q')) (Map ENode rs))
+         -> ENode (Slot i s rs q) 
+         -> STM (ENode (Slot i' s' rs' q'))
+      go d (ENode e' ) = popRoots e' >>= \case 
+        ETree roots' -> withDict d $ pure $ roots' R..! (Label @l)
+
 
 instance Locate (old :> 'Down  (_l ':= Slot i_ s_ rs' q_)) 
       => Locate (old :> 'Down  (_l ':= Slot i_ s_ rs' q_)  :> 'Down (l ':= Slot i s rs q)) where 
   locate (ChildB' key@SlotKey old) e = locate old e >>= \case 
-    (ENode _ (ETree roots) _) -> withDict (deriveHas @ENode key) $ pure $ roots R..! (Label @l)
+    (ENode e') -> popRoots e' >>= \case 
+      ETree roots' -> withDict (deriveHas @ENode key) $ pure $ roots' R..! (Label @l)
 
 mkNavigator :: forall source destination 
              . Extends source destination 
@@ -133,126 +210,6 @@ withAtlas (AnAtlasOf atlas@(MkAtlas _ _)) = goA atlas
                           @(Segment 'Begin path)
                           @children
 
-
-newtype STMNode :: SlotData -> Type where 
-  STMNode :: STM (ENode slot) -> STMNode slot    
-
-
-class (Charted p, Normalized p, SourceOf p source, TargetOf p target) => ConcretePath source target p where 
-  concretePath :: Dict (Charted p, Normalized p, SourceOf p source, TargetOf p target)
-  concretePath = Dict 
-
-instance (Charted p, Normalized p, SourceOf p source, TargetOf p target) => ConcretePath source target p
-
-type family L (lt :: LT SlotData) :: Symbol where 
-  L (l ':-> t) = l
-
-type family T (lt :: LT SlotData) :: SlotData where 
-  T (l ':-> t) = t
- 
-
-data HasSome' :: (k -> Constraint) -> Symbol -> Row k -> Type where 
-  HasSome :: forall k (c :: k -> Constraint) (rk :: Row k) (l :: Symbol) 
-          . ( WellBehaved rk 
-            , KnownSymbol l 
-            , HasType l (rk .! l) rk 
-            , c (rk .! l)) => HasSome' c l rk 
-
-data Some :: (k -> Constraint) -> (k -> Type) -> Type where 
-  Some :: forall k (c :: k -> Constraint) (f :: k -> Type) (a :: k)
-        . c a => f a -> Some c f 
-
-
-
-
-
-unSome :: Some c f -> (forall a. c a => f a -> r) -> r 
-unSome (Some a) f = f a 
-   
-            
-withSome :: forall k (c :: k -> Constraint) (l :: Symbol) (rk :: Row k) r. HasSome c l rk => (forall (x :: k). c x => r) -> r 
-withSome f = case (hasSome :: HasSome' c l rk) of 
-  HasSome -> f @(rk .! l)
-
-withSome' :: forall k (c :: k -> Constraint) (l :: Symbol) (rk :: Row k) r. HasSome' c l rk -> (forall (x :: k). c x => r) -> r 
-withSome' h f = case h of 
-  HasSome -> f @(rk .! l)
-
-class HasSome (c :: k -> Constraint) (l :: Symbol) (rk :: Row k)  where 
-  hasSome :: HasSome' c l rk 
-
-instance ( HasType l (rk .! l) rk
-         , c (rk .! l) 
-         , WellBehaved rk 
-         , KnownSymbol l ) =>  HasSome c l rk   where 
-           hasSome = HasSome
-
-class Source path ~ slot => SourceOf path slot where 
-  sourceOf :: Dict (Source path ~ slot)
-  sourceOf = Dict 
-
-class Target path ~ slot => TargetOf path slot where 
-  targetOf :: Dict (Target path ~ slot)
-  targetOf = Dict 
-
-instance Source path ~ slot => SourceOf path slot 
-
-instance Target path ~ slot => TargetOf path slot 
-
-targetOf' :: TargetOf path slot :- (Target path ~ slot)
-targetOf' = Sub Dict 
-
-getSome :: forall k (f :: k -> Type) l (c :: k -> Constraint)  (rk :: Row k) 
-         . KnownSymbol l
-        => HasSome' c l rk 
-        -> (forall (a :: k). c a =>  f a) 
-        -> Some c f 
-getSome HasSome f = Some $ f @(rk .! l)
-
-data ProxE :: forall k. k -> Type where 
-  ProxE :: forall k (a :: k). Top a => ProxE a 
-
-proxE :: forall k (a :: k). ProxE a 
-proxE = ProxE  
-
-newtype TopDict a = TopDict (Dict (Top a))
-
-class (HasSome (ConcretePath source slot) l (Project source)
-      , KnownSymbol l 
-      , WellBehaved (Project source)) => Compatible source slot l where 
-  unify :: TMVar (Entity source) -> STMNode slot 
-  unify tmv = STMNode $ readTMVar tmv >>= \e -> 
-    case hasSome :: HasSome' (ConcretePath source slot) l (Project source) of 
-      h@HasSome -> case  (getSome  h proxE :: Some (ConcretePath source slot) ProxE) of 
-        x -> go x e 
-   where 
-     go ::  Some (ConcretePath source slot) ProxE -> Entity source -> STM (ENode slot)
-     go x e = unSome x (go2 e)
-
-     go2 :: forall (a :: Path) (slot :: SlotData) (source :: SlotData)
-          . ConcretePath source slot a =>  Entity source -> ProxE a -> STM (ENode slot)
-     go2 e ProxE = locate' @a (chart @a) e 
-
-instance (HasSome (ConcretePath source slot) l (Project source)
-      , KnownSymbol l 
-      , WellBehaved (Project source)) => Compatible source slot l
-
-class (Compatible source (T lt) (L lt), KnownSymbol (L lt)) => Compatible' source (lt :: LT SlotData) where 
-  unify' :: TMVar (Entity source) -> STMNode (T lt)
-  unify' e = unify @source @(T lt) @(L lt) e
-
-instance (Compatible source (T lt) (L lt), KnownSymbol (L lt)) => Compatible' source (lt :: LT SlotData) 
-
-class HasType l (l ':-> k) rk => HasLTK l k rk 
-
-type Labelled :: Row k -> Row (LT k)
-type family Labelled rk = lt | lt -> rk where 
-  Labelled (R lts) = R (LabelledR lts) 
-
-type LabelledR :: [LT k] -> [LT (LT k)]
-type family LabelledR rk = lt | lt -> rk  where 
-  LabelledR '[] = '[]
-  LabelledR (l ':-> k ': lts) = (l ':-> (l ':-> k)) ': LabelledR lts 
 
 
 {--

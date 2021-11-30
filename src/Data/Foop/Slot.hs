@@ -33,7 +33,7 @@ import Data.Row.Internal
       Label(Label),
       Row(..), 
       LT(..) )
-import GHC.TypeLits (Symbol, TypeError)
+import GHC.TypeLits (Symbol, TypeError, KnownSymbol)
 import Data.Row.Dictionaries (mapHas)
 import Data.Foop.Exists 
 
@@ -52,46 +52,33 @@ observeE (Entity tv) =  do
 --}
 -- passing around SlotKeys b/c writing all these constraints everywhere gets tiring 
 lookupLeaf :: forall label slots slot
-               . SlotKey label slots slot
+               . KnownSymbol label 
+              => SlotKey label slots slot
               -> EBranch slots 
               -> ELeaf slot
 lookupLeaf key@SlotKey (EBranch storage) = withDict (deriveHas @ELeaf key) $ storage .! (Label @label)
 
 
-
+{--
 modifyStorage :: forall label slots slot
                . SlotKey label slots slot
-              -> (StorageBox slot -> StorageBox slot)
-              -> Rec (R.Map StorageBox slots)
-              -> Rec (R.Map StorageBox slots)
+              -> (EBranch slot -> EBranch slot)
+              -> Rec (R.Map EBranch slots)
+              -> Rec (R.Map EBranch slots)
 modifyStorage key@SlotKey f storage
-  = withDict (deriveHas @StorageBox key)
+  = withDict (deriveHas @EBranch key)
   $ R.update (Label @label) (f $ storage .! (Label @label)) storage
+--}
 
-mkProxy :: forall slots. ( AllUniqueLabels slots
-         , AllUniqueLabels (R.Map Proxy slots)
-         , Forall (R.Map Proxy slots) Default
-         ) => Proxy slots 
-           -> Rec (R.Map Proxy slots)
-mkProxy Proxy = R.default' @Default def
 
 type TestRow = "slot1" .== Slot Int String Empty Maybe
             .+ "slot2" .== Slot String Int Empty Maybe
 
 instance Default (Proxy (a :: k)) where
   def = Proxy
+{--
 
-toStorage :: forall slots. (Forall slots SlotOrdC)
-          => Proxy slots
-          -> Rec (R.Map Proxy slots)
-          -> Rec (R.Map StorageBox slots)
-toStorage proxy = R.transform @SlotOrdC @slots @Proxy @StorageBox go
-  where
-    go :: forall slot
-        . Proxy slot
-       -> StorageBox slot
-    go proxy' =  MkStorageBox M.empty
-
+--}
 apSegment :: forall slot path x. slot ~ Source path => Segment x path -> Segment x path 
 apSegment = id 
 
@@ -109,11 +96,26 @@ mkRenderTree :: ( AllUniqueLabels slots
                 ) => Proxy slots 
                   -> IO (RenderTree slots)
 mkRenderTree proxy = MkRenderTree <$> atomically (toSurface proxy (mkStorage proxy))
+
+
+
 --}
 
+toStorage :: forall slots. (Forall slots (SlotI Ord))
+          => Proxy slots
+          -> Rec (R.Map Proxy slots)
+          -> EBranch slots
+toStorage proxy xs = EBranch $ R.transform @(SlotI Ord) @slots @Proxy @ELeaf go xs 
+  where
+    go :: forall slot 
+        .  SlotI Ord slot
+       => Proxy slot
+       -> ELeaf slot
+    go proxy' = ELeaf M.empty
+
 mkStorage :: (AllUniqueLabels slots, AllUniqueLabels (R.Map Proxy slots),
- Forall slots SlotOrdC, Forall (R.Map Proxy slots) Default) =>
- Proxy slots -> Rec (R.Map StorageBox slots)
+ Forall slots (SlotI Ord), Forall (R.Map Proxy slots) Default) =>
+ Proxy slots ->  EBranch slots
 mkStorage proxy = toStorage proxy $ mkProxy  proxy
 
 projProxy :: Proxy (slot :: SlotData) -> Proxy (Project slot)

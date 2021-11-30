@@ -7,7 +7,7 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad ( replicateM_ ) 
 import Data.Functor ((<&>))
 import Control.Monad.State.Class ( MonadState(get), modify' ) 
-import Data.Row ( Empty, type (.==), type (.+), (.==) ) 
+import Data.Row ( Empty, type (.==), type (.+), (.==), (.+) ) 
 import Data.Proxy (Proxy (Proxy)) 
 import Control.Concurrent.STM () 
 import Data.Row.Internal
@@ -55,13 +55,15 @@ instance TOP c
 
 
 
-testDeps = MkPaths (#here .== Here @'Begin @MySlot)
 
+counter :: Ord i => Model loc (Slot i String Empty CounterLogic)
 counter =  Model $ MkSpec {
     initialState = 0 :: Int
   , handleQuery  = mkQHandler_ runCounterLogic 
   , renderer     = mkSimpleRender show  -- this is a function from the component's state to its surface
-  , slots        = emptySlots 
+  , roots        = MkModels R.empty  
+  , shoots       = Proxy @Empty 
+  , dependencies = Proxy @Empty 
   }
  where 
   runCounterLogic =  \case 
@@ -147,57 +149,22 @@ data CountersLogic x where
 type CountersSlots = "counterA" .== Slot String String Empty CounterLogic 
                   .+ "counterB" .== Slot Char String Empty CounterLogic 
 
---mkCounters :: Prototype String CountersLogic
 
-mkIndexed :: forall i root deps state surface slots query
-           . Spec deps state (Slot i surface slots query)
-          -> Spec deps state (Slot i surface slots query)
-mkIndexed = id 
 
-mkRoot :: Spec deps state (Slot i surface slots query)
-       -> Spec deps state (Slot i surface slots query)
-mkRoot = id 
+boop = activate counters 
 
-instSlots :: forall slots i deps state surface query
-       . Spec deps state (Slot i surface slots query)
-      -> Spec deps state (Slot i surface slots query)
-instSlots = id 
-
-counters :: (Exists
-   (Rooted
-      (Slot
-         i1
-         String
-         ('R
-            '[ "counterA"
-               ':-> '(String, String, RenderTree Empty, CounterLogic),
-               "counterB" ':-> '(Char, String, RenderTree Empty, CounterLogic)])
-         CountersLogic))
-   (PathFinder 'Begin)
-   (PathFinder start (start ':> 'Leaf_ (Slot i2 su cs q))),
- Ord i2) =>
-  Model
-    ('R
-      '[ "here"
-          ':-> PathFinder start (start ':> 'Leaf_ (Slot i2 su cs q))])
-    (Slot
-      i1
-      String
-      ('R
-          '[ "counterA"
-            ':-> '(String, String, RenderTree Empty, CounterLogic),
-            "counterB" ':-> '(Char, String, RenderTree Empty, CounterLogic)])
-      CountersLogic)
-counters =  Model $ MkSpec {
+counters =  Model MkSpec {
     initialState = ()
-  , handleQuery = mkQHandler myPaths runCounters 
+  , handleQuery = mkQHandler  runCounters 
   , renderer = mkSimpleRender show
-  , slots = Proxy @CountersSlots
+  , shoots = Proxy @CountersSlots
+  , roots  = MkModels ( #counterA .== counter @String  
+                     .+ #counterB .== counter @Char)
+  , dependencies = Proxy @("counterA" .== Slot String String Empty CounterLogic)
   }
  where
-   myPaths = MkPaths $ #here .== Here 
 
-   runCounters myPaths = \case 
+   runCounters Proxy = \case 
     NewCounterA n x -> do 
       create @"counterA" n counter
       pure x  
@@ -211,7 +178,7 @@ counters =  Model $ MkSpec {
       pure x 
 
     TellCounter k t x  -> do  
-    --  hm <- observe_ #here id
+      hm <- observe #counterA id
       either (\i -> tell @"counterA" i t) (\i -> tell @"counterB" i t) k 
       pure x  
 
