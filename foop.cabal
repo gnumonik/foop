@@ -52,6 +52,8 @@ library
     , constraints
     , containers
     , data-default
+    , singletons < 3.0
+
 
 
   default-language: Haskell2010

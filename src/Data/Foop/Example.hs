@@ -19,6 +19,11 @@ import qualified Data.Row.Records as R
 import Data.Kind
 import Data.Foop.Exists
 
+
+{-- 
+    TOMORROW - Make a nontrivial program and adjust 
+--}
+
 -- Example #1: A Simple Counter 
 
 -- | This is the data type that records the query logic for 
@@ -53,17 +58,15 @@ type TOP :: forall k. k -> Constraint
 class TOP c 
 instance TOP c 
 
+emptyModels :: Models Empty 
+emptyModels = MkModels R.empty 
 
-
-
-counter :: Ord i => Model loc (Slot i String Empty CounterLogic)
-counter =  Model $ MkSpec {
+counter :: Model (Slot String Empty Empty CounterLogic)
+counter =  install emptyModels $ MkSpec {
     initialState = 0 :: Int
   , handleQuery  = mkQHandler_ runCounterLogic 
   , renderer     = mkSimpleRender show  -- this is a function from the component's state to its surface
-  , roots        = MkModels R.empty  
-  , shoots       = Proxy @Empty 
-  , dependencies = Proxy @Empty 
+  , chart'       = emptyChart
   }
  where 
   runCounterLogic =  \case 
@@ -87,16 +90,13 @@ counter =  Model $ MkSpec {
 -- we can directly run queries, we might create "methods" such as these,
 -- which use request' and tell'
 
-printCount' :: Object (Slot () s cs CounterLogic) -> IO ()
 printCount' = tell' PrintCount 
 
-getCount' :: Object (Slot () s cs CounterLogic) -> IO Int
 getCount' = request' GetCount 
 
-tick' :: Object (Slot () s cs CounterLogic) -> IO ()
 tick' = tell' Tick  
 
-reset' :: Object (Slot () s cs CounterLogic) -> IO ()
+reset' :: Object (Slot s cs ds CounterLogic) -> IO ()
 reset' = tell' Reset
 
 -- And we could use them like so: 
@@ -146,44 +146,63 @@ data CountersLogic x where
 
   RequestCounter :: Either String Char -> Request CounterLogic a -> (Maybe a -> x) -> CountersLogic x 
 
-type CountersSlots = "counterA" .== Slot String String Empty CounterLogic 
-                  .+ "counterB" .== Slot Char String Empty CounterLogic 
+type CountersSlots = "counterA" .== Slot String Empty Empty CounterLogic 
+                  .+ "counterB" .== Slot String Empty Empty CounterLogic 
 
+type SlotI' i su cs ds q = IxSlot i (Slot su cs ds q)
 
-
-boop = activate counters 
-
-counters =  Model MkSpec {
+counters :: Spec
+  ('R
+     '[ "counterA1"
+        ':-> '(String, Slot String Empty Empty CounterLogic),
+        "counterB1" ':-> '(Char, Slot String Empty Empty CounterLogic)])
+  ()
+  (Slot
+     String
+     ('R
+        '[ "counterA"
+           ':-> '(String, ETree Empty, Deps Empty, CounterLogic),
+           "counterB" ':-> '(String, ETree Empty, Deps Empty, CounterLogic)])
+     ('R
+        '[ "counterA"
+           ':-> '(String, ETree Empty, Deps Empty, CounterLogic)])
+     CountersLogic)
+counters =  MkSpec {
     initialState = ()
-  , handleQuery = mkQHandler  runCounters 
+  , handleQuery = mkQHandler myChart runCounters 
   , renderer = mkSimpleRender show
-  , shoots = Proxy @CountersSlots
-  , roots  = MkModels ( #counterA .== counter @String  
-                     .+ #counterB .== counter @Char)
-  , dependencies = Proxy @("counterA" .== Slot String String Empty CounterLogic)
+  , chart'   = myChart
   }
  where
 
-   runCounters Proxy = \case 
+   myChart = MkChart { mkShoots = Proxy @( "counterA1" .== SlotI' String String Empty Empty CounterLogic
+                                        .+ "counterB1" .== SlotI' Char String Empty Empty CounterLogic  )
+
+                     , mkDeps   = Proxy @( "counterA" .== Slot String Empty Empty CounterLogic)
+                     
+                     , mkRoots =  Proxy @( "counterA" .== Slot String Empty Empty CounterLogic
+                                        .+ "counterB" .== Slot String Empty Empty CounterLogic) }
+
+   runCounters chart = \case 
     NewCounterA n x -> do 
-      create @"counterA" n counter
+      create @"counterA1" n counter
       pure x  
 
     NewCounterB n x -> do 
-      create @"counterB" n counter
+      create @"counterB1" n counter
       pure x  
 
     DeleteCounter k x -> do  
-      either (delete @"counterA") (delete @"counterB") k 
+      either (delete @"counterA1") (delete @"counterB1") k 
       pure x 
 
     TellCounter k t x  -> do  
       hm <- observe #counterA id
-      either (\i -> tell @"counterA" i t) (\i -> tell @"counterB" i t) k 
+      either (\i -> tell @"counterA1" i t) (\i -> tell @"counterB1" i t) k 
       pure x  
 
     RequestCounter k r f -> do  
-      output <- either (\i -> request @"counterA" i r) (\i -> request @"counterB" i r) k 
+      output <- either (\i -> request @"counterA1" i r) (\i -> request @"counterB1" i r) k 
       pure (f output) 
 
     

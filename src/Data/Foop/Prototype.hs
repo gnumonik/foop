@@ -18,21 +18,6 @@ import qualified Data.Constraint.Forall as DC
 import Control.Comonad.Store 
 import Data.Row.Internal
 
-mapE :: forall k (c :: k -> Constraint) (a :: k) r r'  
-            . (c a => r)
-           -> (r -> r')
-           -> (Dict (c a) -> r')
-mapE f g = \d@Dict -> withDict d g f 
-
-mapC :: forall k (c :: k -> Constraint) (a :: k) r r' 
-      . (c a => r)
-     -> (r -> r')
-     -> (c a => r')
-mapC cr f = go 
- where 
-   go :: c a => r'
-   go = f cr 
-
 -- | Apply a natural transformation to (probably) a functor 
 apNT :: m :~> n -> m a -> n a 
 apNT (NT f) = f 
@@ -53,17 +38,21 @@ queryHandler :: forall query roots shoots state deps
        -> AlgebraQ query :~> EntityM deps roots shoots state query IO 
 queryHandler eval = NT $ \(Q q) -> unCoyoneda (\g -> fmap g . eval) q 
 
-mkQHandler_ :: forall slot query roots shoots state 
-             . (forall x. query x -> EntityM  (R '[]) roots shoots state query IO x)
-             -> Handler slot query (R '[]) roots shoots state
-mkQHandler_ f = mkQHandler  (const f)   
+emptyChart :: Chart  Empty Empty Empty 
+emptyChart = MkChart {mkDeps = Proxy, mkRoots = Proxy, mkShoots = Proxy}
 
-mkQHandler :: forall slot query deps roots shoots state  
-            .  (forall x. Proxy deps -> query x -> EntityM  deps roots shoots state query IO x)
-           -> Handler slot query deps roots shoots state 
-mkQHandler  eval = Handler $ store (accessor ) Proxy 
+mkQHandler_ :: forall  slot query  state 
+             . (forall x. query x -> EntityM Empty Empty Empty state query IO x)
+             -> Handler slot query Empty Empty Empty state
+mkQHandler_ f = mkQHandler emptyChart (const f)   
+
+mkQHandler :: forall source slot query deps roots shoots state  
+            . Chart  deps roots shoots 
+           -> (forall x. Chart  deps roots shoots -> query x -> EntityM  deps roots shoots state query IO x)
+           -> Handler  slot query deps roots shoots state 
+mkQHandler p eval = Handler $ store accessor p 
   where 
-    accessor :: Proxy deps -> AlgebraQ query :~> EntityM deps roots shoots state query IO
+    accessor :: Chart  deps roots shoots -> AlgebraQ query :~> EntityM deps roots shoots state query IO
     accessor p = NT $ \(Q q) -> unCoyoneda (\g -> fmap g . eval p) q 
 
 unCoyoneda :: forall (q :: Type -> Type) 
@@ -74,3 +63,6 @@ unCoyoneda :: forall (q :: Type -> Type)
             -> r 
 unCoyoneda f (Coyoneda ba fb) = f ba fb  
 
+
+install :: Models rs -> Spec shoots state (Slot su rs ds q) -> Model (Slot su rs ds q)
+install ms spec = Model spec ms 

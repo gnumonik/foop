@@ -20,12 +20,3 @@ deriveHas'  = withDict
     (mapDict weaken1 $ mapDict (mapHas @f @label @slot @slots) (Dict @((slots .! label) ~ slot)))
     Dict
 
-{--
-deriveSurfaceHas :: forall label slots slot
-                  . RootKey label slots slot
-                 -> Dict (HasType label (RenderBranch slot) (R.Map RenderBranch slots))
-deriveSurfaceHas RootKey
-  = withDict
-    (mapDict weaken1 $ mapDict (mapHas @RenderBranch @label @slot @slots) (Dict @((slots .! label) ~ slot)))
-    Dict
---}

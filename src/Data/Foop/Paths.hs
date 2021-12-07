@@ -33,90 +33,27 @@ data RootOf :: Path -> Type where
 mkENode :: Entity slot -> ENode slot 
 mkENode = undefined 
 
-{- 
-
-• Could not deduce: (Map ENode rs2 .! l)
-                    ~ ENode '(i, s, ETree rs, q)
-  from the context: ((('Begin ':> 'Start (Slot i_ s_ rs' q_))
-                      ':> 'Down (l ':= Slot i s rs q))
-                     ~ (('Begin ':> 'Start (Slot i1 su rs1 q1))
-                        ':> 'Down (l' ':= Slot i' su' rs'1 q')),
-                     KnownSymbol l', HasType l' (Slot i' su' rs'1 q') rs1,
-                     Locate ('Begin ':> 'Start (Slot i1 su rs1 q1)),
-                     Locate
-                       (('Begin ':> 'Start (Slot i1 su rs1 q1))
-                        ':> 'Down (l' ':= Slot i' su' rs'1 q')))
-    bound by a pattern with constructor:
-               ChildA' :: forall k1 k2 k3 k4 (l :: k1) (l' :: Symbol) i su
-                                 (rs :: Row SlotData) (ss :: k2) (q :: Type -> Type) i' su'
-                                 (rs' :: Row SlotData) (ss' :: k3) (q' :: Type -> Type) (old :: k4).
-                          (KnownSymbol l', HasType l' (Slot i' su' rs' q') rs,
-                           Locate ('Begin ':> 'Start (Slot i su rs q)),
-                           Locate
-                             (('Begin ':> 'Start (Slot i su rs q))
-                              ':> 'Down (l' ':= Slot i' su' rs' q'))) =>
-                          SlotKey l' rs (Slot i' su' rs' q')
-                          -> Segment' ('Begin ':> 'Start (Slot i su rs q))
-                          -> Segment'
-                               (('Begin ':> 'Start (Slot i su rs q))
-                                ':> 'Down (l' ':= Slot i' su' rs' q')),
-             in an equation for ‘locate’
-    at /home/gsh/code/haskell/foop/src/Data/Foop/Paths.hs:44:11-33
-  or from: HasType l (ENode (Slot i s rs q)) (Map ENode rs')
-    bound by a type expected by the context:
-               HasType l (ENode (Slot i s rs q)) (Map ENode rs') =>
-               STM (ENode '(i, s, ETree rs, q))
-    at /home/gsh/code/haskell/foop/src/Data/Foop/Paths.hs:45:68-95
-• In the second argument of ‘($)’, namely ‘roots .! (Label @l)’
-  In the second argument of ‘($)’, namely
-    ‘pure $ roots .! (Label @l)’
-  In the expression:
-    withDict (deriveHas @ENode key) $ pure $ roots .! (Label @l)
-• Relevant bindings include
-    roots :: Rec (Map ENode rs2)
-      (bound at /home/gsh/code/haskell/foop/src/Data/Foop/Paths.hs:45:21)
-    e :: Entity
-           (Source
-              (('Begin ':> 'Start (Slot i_ s_ rs' q_))
-               ':> 'Down (l ':= Slot i s rs q)))
-      (bound at /home/gsh/code/haskell/foop/src/Data/Foop/Paths.hs:44:36)
-    locate :: Segment'
-                (('Begin ':> 'Start (Slot i_ s_ rs' q_))
-                 ':> 'Down (l ':= Slot i s rs q))
-              -> Entity
-                   (Source
-                      (('Begin ':> 'Start (Slot i_ s_ rs' q_))
-                       ':> 'Down (l ':= Slot i s rs q)))
-              -> STM
-                   (ENode
-                      (Target
-                         (('Begin ':> 'Start (Slot i_ s_ rs' q_))
-                          ':> 'Down (l ':= Slot i s rs q))))
-      (bound at /home/gsh/code/haskell/foop/src/Data/Foop/Paths.hs:44:3)
-
--}
-
-popRoots :: Entity (Slot i su rs q) -> STM (ETree rs) 
+popRoots :: Entity (Slot su rs ds q) -> STM (ETree rs) 
 popRoots (Entity e) = readTVar e >>= \t-> case pos t of 
   ExEvalState (EvalState _ _ _ roots _ _) -> pure roots 
 
-instance Locate ('Begin ':> 'Start (Slot i s rs q)) where 
+instance Locate ('Begin ':> 'Start (Slot  s rs ds q)) where 
   locate Here' e = pure $ mkENode e 
 
-instance (rs .! l) ~ (Slot i' s' rs' q') =>  Locate ('Begin :> 'Start ( Slot i s rs q) :> 'Down (l ':= Slot i' s' rs' q')) where 
+instance (rs .! l) ~ (Slot s' rs' ds' q') =>  Locate ('Begin :> 'Start ( Slot s rs ds q) :> 'Down (l ':= Slot s' rs' ds' q')) where 
   locate (ChildA' key@SlotKey old) e = locate old e >>= \case 
-    en@(ENode e'  :: ENode (Slot i s rs q)) -> case deriveHas @ENode key of 
+    en@(ENode e'  :: ENode (Slot s rs ds q)) -> case deriveHas @ENode key of 
       d@Dict -> go d en 
    where 
-      go :: Dict (HasType l (ENode (Slot i' s' rs' q')) (Map ENode rs))
-         -> ENode (Slot i s rs q) 
-         -> STM (ENode (Slot i' s' rs' q'))
+      go :: Dict (HasType l (ENode (Slot s' rs' ds' q')) (Map ENode rs))
+         -> ENode (Slot s rs ds q) 
+         -> STM (ENode (Slot s' rs' ds' q'))
       go d (ENode e' ) = popRoots e' >>= \case 
         ETree roots' -> withDict d $ pure $ roots' R..! (Label @l)
 
 
-instance Locate (old :> 'Down  (_l ':= Slot i_ s_ rs' q_)) 
-      => Locate (old :> 'Down  (_l ':= Slot i_ s_ rs' q_)  :> 'Down (l ':= Slot i s rs q)) where 
+instance Locate (old :> 'Down  (_l ':= Slot s_ rs' ds' q_)) 
+      => Locate (old :> 'Down  (_l ':= Slot s_ rs' ds' q_)  :> 'Down (l ':= Slot s rs ds q)) where 
   locate (ChildB' key@SlotKey old) e = locate old e >>= \case 
     (ENode e') -> popRoots e' >>= \case 
       ETree roots' -> withDict (deriveHas @ENode key) $ pure $ roots' R..! (Label @l)
@@ -209,45 +146,3 @@ withAtlas (AnAtlasOf atlas@(MkAtlas _ _)) = goA atlas
                           @l 
                           @(Segment 'Begin path)
                           @children
-
-
-
-{--
-class ( Forall (Project source) NormalCharted
-      , Forall (Project source) Locate 
-      , AllUniqueLabels (R.Map Proxy (Project source))
-      , AllUniqueLabels (Project source)
-      , KnownSymbol (L lt) 
-    --  , HasType (L lt) _hm (Project source)
-    --  , Fo 
-      , Forall (R.Map Proxy (Project source)) Default) => HasPathAt (source :: SlotData) (lt :: Symbol := SlotData) where 
-  pathify :: forall l slot (xs :: Path)
-           . ( lt ~ (l ':= slot)
-             , KnownSymbol l
-             , HasType l (xs :> 'Down (l ':= slot)) (Project source)
-             , (Project source .! l) ~ (xs :> 'Down (l ':= slot)) 
-             , Source xs ~ source 
-             , Target (Project source .! l) ~ slot 
-             ) => TMVar (Entity source)
-               -> STMNode slot 
-  pathify tmv = STMNode $ readTMVar tmv >>= \e ->  locate' myPath e 
-    where  
-      proxified  = mkProxy (Proxy @(Project source))
-
-      myPath :: Segment' (xs :> 'Down (l ':= slot))
-      myPath = withDict (mapHas @Segment' @l @(xs :> 'Down (l ':= slot)) @(Project source)) $ pathed R..! (Label @l)
-
-      pathed :: Rec (R.Map Segment' (Project source))
-      pathed = R.transform @NormalCharted @(Project source) @Proxy @Segment' go proxified 
-
-      go :: forall p. (Charted p, Normalized p) => Proxy p -> Segment' p 
-      go Proxy = chart @p
- --}
-
-{--
-instance ( Forall (Project source) NormalChartedLocate 
-      , Forall (Project source) Locate 
-      , AllUniqueLabels (R.Map Proxy (Project source))
-      , AllUniqueLabels (Project source)
-      , Forall (R.Map Proxy (Project source)) Default) => HasPathAt (source :: SlotData) (lt :: Symbol := SlotData)
---}
