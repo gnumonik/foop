@@ -66,7 +66,7 @@ counter =  install emptyModels $ MkSpec {
     initialState = 0 :: Int
   , handleQuery  = mkQHandler_ runCounterLogic 
   , renderer     = mkSimpleRender show  -- this is a function from the component's state to its surface
-  , chart'       = emptyChart
+  , atlas        = emptyChart
   }
  where 
   runCounterLogic =  \case 
@@ -126,7 +126,7 @@ testCounter = do
 -- Also note that the constraints required to make this work are *quite* involved, and although
 -- GHC can and will infer the type signature, your code might be prettier if you just left it off :)  
 
-
+{-
 printCount i = tell i PrintCount 
 
 getCount i = request i GetCount 
@@ -134,6 +134,7 @@ getCount i = request i GetCount
 tick i = tell i Tick 
 
 rest i = tell i Reset 
+-}
 
 data CountersLogic x where 
   NewCounterA    :: String -> x -> CountersLogic x 
@@ -144,66 +145,47 @@ data CountersLogic x where
 
   TellCounter    :: Either String Char -> Tell CounterLogic -> x -> CountersLogic x 
 
-  RequestCounter :: Either String Char -> Request CounterLogic a -> (Maybe a -> x) -> CountersLogic x 
+-- RequestCounter :: Either String Char -> Request CounterLogic a -> (Maybe a -> x) -> CountersLogic x 
 
 type CountersSlots = "counterA" .== Slot String Empty Empty CounterLogic 
                   .+ "counterB" .== Slot String Empty Empty CounterLogic 
 
 type SlotI' i su cs ds q = IxSlot i (Slot su cs ds q)
 
-counters :: Spec
-  ('R
-     '[ "counterA1"
-        ':-> '(String, Slot String Empty Empty CounterLogic),
-        "counterB1" ':-> '(Char, Slot String Empty Empty CounterLogic)])
-  ()
-  (Slot
-     String
-     ('R
-        '[ "counterA"
-           ':-> '(String, ETree Empty, Deps Empty, CounterLogic),
-           "counterB" ':-> '(String, ETree Empty, Deps Empty, CounterLogic)])
-     ('R
-        '[ "counterA"
-           ':-> '(String, ETree Empty, Deps Empty, CounterLogic)])
-     CountersLogic)
 counters =  MkSpec {
     initialState = ()
   , handleQuery = mkQHandler myChart runCounters 
-  , renderer = mkSimpleRender show
-  , chart'   = myChart
+  , renderer    = mkSimpleRender show
+  , atlas       = myChart
   }
  where
 
-   myChart = MkChart { mkShoots = Proxy @( "counterA1" .== SlotI' String String Empty Empty CounterLogic
-                                        .+ "counterB1" .== SlotI' Char String Empty Empty CounterLogic  )
-
-                     , mkDeps   = Proxy @( "counterA" .== Slot String Empty Empty CounterLogic)
+   myChart = MkChart { mkDeps   = Proxy @( "counterA" .== Slot String Empty Empty CounterLogic)
                      
                      , mkRoots =  Proxy @( "counterA" .== Slot String Empty Empty CounterLogic
                                         .+ "counterB" .== Slot String Empty Empty CounterLogic) }
 
    runCounters chart = \case 
     NewCounterA n x -> do 
-      create @"counterA1" n counter
+    --  create @"counterA1" n counter
       pure x  
 
     NewCounterB n x -> do 
-      create @"counterB1" n counter
+    --  create @"counterB1" n counter
       pure x  
 
     DeleteCounter k x -> do  
-      either (delete @"counterA1") (delete @"counterB1") k 
+    --  either (delete @"counterA1") (delete @"counterB1") k 
       pure x 
 
     TellCounter k t x  -> do  
-      hm <- observe #counterA id
-      either (\i -> tell @"counterA1" i t) (\i -> tell @"counterB1" i t) k 
+    --  hm <- observe #counterA id
+    --  either (\i -> tell @"counterA1" i t) (\i -> tell @"counterB1" i t) k 
       pure x  
 
-    RequestCounter k r f -> do  
-      output <- either (\i -> request @"counterA1" i r) (\i -> request @"counterB1" i r) k 
-      pure (f output) 
+  --  RequestCounter k r f -> do  
+    --  output <- either (\i -> request @"counterA1" i r) (\i -> request @"counterB1" i r) k 
+    -- pure (f output) 
 
     
 

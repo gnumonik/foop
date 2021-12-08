@@ -46,7 +46,8 @@ lookupLeaf :: forall label slots slot
               => ShootKey label slots slot
               -> EBranch slots 
               -> ELeaf slot
-lookupLeaf (key@(ShootKey )) (EBranch storage) = withDict (deriveHas' @ELeaf @label @slots @slot) $ storage .! (Label @label)
+lookupLeaf key@ShootKey (EBranch storage) 
+  = withDict (deriveHas' @ELeaf @label @slots @slot) $ storage .! (Label @label)
 
 
 {--

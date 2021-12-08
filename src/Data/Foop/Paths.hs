@@ -35,7 +35,7 @@ mkENode = undefined
 
 popRoots :: Entity (Slot su rs ds q) -> STM (ETree rs) 
 popRoots (Entity e) = readTVar e >>= \t-> case pos t of 
-  ExEvalState (EvalState _ _ _ roots _ _) -> pure roots 
+  ExEvalState (EvalState _ _ roots _ _ _) -> pure roots 
 
 instance Locate ('Begin ':> 'Start (Slot  s rs ds q)) where 
   locate Here' e = pure $ mkENode e 
@@ -51,12 +51,33 @@ instance (rs .! l) ~ (Slot s' rs' ds' q') =>  Locate ('Begin :> 'Start ( Slot s 
       go d (ENode e' ) = popRoots e' >>= \case 
         ETree roots' -> withDict d $ pure $ roots' R..! (Label @l)
 
-
+{-
 instance Locate (old :> 'Down  (_l ':= Slot s_ rs' ds' q_)) 
       => Locate (old :> 'Down  (_l ':= Slot s_ rs' ds' q_)  :> 'Down (l ':= Slot s rs ds q)) where 
   locate (ChildB' key@SlotKey old) e = locate old e >>= \case 
     (ENode e') -> popRoots e' >>= \case 
       ETree roots' -> withDict (deriveHas @ENode key) $ pure $ roots' R..! (Label @l)
+
+
+data AnAtlasOf :: Row Type -> Type where 
+  AnAtlasOf :: Forall children (Exists (Extends parent) (Segment 'Begin)) 
+            => Atlas parent children 
+            -> AnAtlasOf children 
+
+data Atlas :: Path -> Row Type -> Type where 
+  MkAtlas :: forall parent children 
+           . TMVar (Entity (Source parent))
+          -> Unified parent children 
+          -> Atlas parent children
+
+data Navigator :: Path -> Path -> Type where 
+  MkNavigator :: forall source destination 
+              . (Entity (Source source) -> STM (ENode (Target destination)))
+              -> Navigator source destination
+
+type Unified parent children 
+  = Rec (R.Map (Deriving (Extends parent) (Segment 'Begin) (Navigator parent)) children)
+
 
 mkNavigator :: forall source destination 
              . Extends source destination 
@@ -146,3 +167,4 @@ withAtlas (AnAtlasOf atlas@(MkAtlas _ _)) = goA atlas
                           @l 
                           @(Segment 'Begin path)
                           @children
+-}

@@ -33,26 +33,26 @@ mkSimpleRender f = MkRenderer f (const $ pure ())
 
 -- | `queryHandler` takes a function of type (forall x. query x -> EntityM slots state query m)
 --   and packages it into a boxed natural transformation. 
-queryHandler :: forall query roots shoots state deps 
-        . (query ~> EntityM deps roots shoots state query IO)
-       -> AlgebraQ query :~> EntityM deps roots shoots state query IO 
+queryHandler :: forall query roots state deps 
+        . (query ~> EntityM deps roots state query IO)
+       -> AlgebraQ query :~> EntityM deps roots state query IO 
 queryHandler eval = NT $ \(Q q) -> unCoyoneda (\g -> fmap g . eval) q 
 
-emptyChart :: Chart  Empty Empty Empty 
-emptyChart = MkChart {mkDeps = Proxy, mkRoots = Proxy, mkShoots = Proxy}
+emptyChart :: Chart  Empty Empty 
+emptyChart = MkChart {mkDeps = Proxy, mkRoots = Proxy}
 
 mkQHandler_ :: forall  slot query  state 
-             . (forall x. query x -> EntityM Empty Empty Empty state query IO x)
-             -> Handler slot query Empty Empty Empty state
+             . (forall x. query x -> EntityM Empty Empty state query IO x)
+             -> Handler slot query Empty Empty state
 mkQHandler_ f = mkQHandler emptyChart (const f)   
 
-mkQHandler :: forall source slot query deps roots shoots state  
-            . Chart  deps roots shoots 
-           -> (forall x. Chart  deps roots shoots -> query x -> EntityM  deps roots shoots state query IO x)
-           -> Handler  slot query deps roots shoots state 
+mkQHandler :: forall source slot query deps roots  state  
+            . Chart deps roots  
+           -> (forall x. Chart  deps roots  -> query x -> EntityM  deps roots state query IO x)
+           -> Handler  slot query deps roots state 
 mkQHandler p eval = Handler $ store accessor p 
   where 
-    accessor :: Chart  deps roots shoots -> AlgebraQ query :~> EntityM deps roots shoots state query IO
+    accessor :: Chart deps roots -> AlgebraQ query :~> EntityM deps roots state query IO
     accessor p = NT $ \(Q q) -> unCoyoneda (\g -> fmap g . eval p) q 
 
 unCoyoneda :: forall (q :: Type -> Type) 
@@ -63,6 +63,5 @@ unCoyoneda :: forall (q :: Type -> Type)
             -> r 
 unCoyoneda f (Coyoneda ba fb) = f ba fb  
 
-
-install :: Models rs -> Spec shoots state (Slot su rs ds q) -> Model (Slot su rs ds q)
+install :: Models rs -> Spec state (Slot su rs ds q) -> Model (Slot su rs ds q)
 install ms spec = Model spec ms 

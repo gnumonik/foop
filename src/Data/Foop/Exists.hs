@@ -164,35 +164,6 @@ discharge :: forall c f g t r
           -> r 
 discharge  (Deriving f (Ex ft)) g = g (f ft)
  
-data Ex2 :: (k1 -> Constraint) -> (k2 -> Constraint) -> (k1 -> k2 -> Type) -> Type -> Type where 
-  Ex2 :: forall k1 k2  
-                (a  :: k1)
-                (b  :: k2)
-                (f  :: k1 -> k2 -> Type)
-                (c1 :: k1 -> Constraint)
-                (c2 :: k2 -> Constraint)
-                (t :: Type)
-       . (t ~ f a b, c1 a, c2 b) => f a b -> Ex2 c1 c2 f t  
-
-data Ex2W :: (k1 -> Constraint) -> (k2 -> Constraint) -> (k1 -> k2 -> Type) -> Type -> Type where 
-  Ex2W :: forall k1 k2  
-                (a  :: k1)
-                (b  :: k2)
-                (f  :: k1 -> k2 -> Type)
-                (c1 :: k1 -> Constraint)
-                (c2 :: k2 -> Constraint)
-                (t :: Type)
-       . (t ~ f a b, c1 a, c2 b) =>  Ex2W c1 c2 f t
-
-type Exists2 :: (k1 -> Constraint) -> (k2 -> Constraint) -> (k1 -> k2 -> Type) -> Type -> Constraint 
-class Exists2 c1 c2 f t where 
-  ex2 :: forall a b. (c1 a, c2 b, t ~ f a b) => f a b -> Ex2 c1 c2 f t 
-  ex2 = Ex2 
-
-  ex2W :: Ex2W c1 c2 f t 
-
-instance (c1 a, c2 b) => Exists2 c1 c2 f (f a b) where 
-  ex2W = Ex2W 
 
 allHave :: forall f c children 
         . Forall children (Exists c f) 
