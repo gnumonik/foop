@@ -107,21 +107,21 @@ data ShootKey :: Symbol -> Row IxSlotData -> IxSlotData -> Type where
 --   `query` is the ADT which represents the component's algebra 
 --
 --   `m` is the inner functor (which for now will always be IO)
-type EntityF :: Row SlotData -> Row SlotData -> Type -> (Type -> Type) -> (Type -> Type) -> Type -> Type
-data EntityF deps roots state query m a where
-  State   :: (state -> (a,state)) -> EntityF deps roots  state query m a
+type EntityF :: Row SlotData -> Row SlotData -> Type -> Type -> (Type -> Type) -> (Type -> Type) -> Type -> Type
+data EntityF deps roots surface state query m a where
+  State   :: (state -> (a,state)) -> EntityF deps roots surface state query m a
 
-  Lift    :: m a -> EntityF deps roots state query m a
+  Lift    :: m a -> EntityF deps roots surface state query m a
 
   Interact :: (HasType l slot deps, KnownSymbol l)
            => Label l 
           -> (ENode slot -> STM a)
-          -> EntityF deps roots state query m a 
+          -> EntityF deps roots surface state query m a 
 
-  Origin   :: (forall su. Origin (Slot su roots deps query) -> a) 
-           -> EntityF deps roots state query m a 
+  Origin   :: (Origin (Slot surface roots deps query) -> a) 
+           -> EntityF deps roots surface state query m a 
 
-  Query    :: Coyoneda query a -> EntityF deps roots state query m a
+  Query    :: Coyoneda query a -> EntityF deps roots surface state query m a
 {-
   GetShoot :: ShootKey l shoots slot 
            -> (ELeaf slot -> a) 
@@ -129,7 +129,7 @@ data EntityF deps roots state query m a where
 -}
   GetRoot :: SlotKey l roots slot 
           -> (ENode slot -> a)
-          -> EntityF deps roots state query m a
+          -> EntityF deps roots surface state query m a
 {-
   Create   :: ShootKey l shoots (IxSlot i (Slot su rs ds q))
            -> Label l 
@@ -143,7 +143,7 @@ data EntityF deps roots state query m a where
            -> a 
            -> EntityF deps roots state query m a
 -}
-instance Functor m => Functor (EntityF deps roots state query m) where
+instance Functor m => Functor (EntityF deps roots surface state query m) where
   fmap f =  \case
         State k                  -> State (first f . k)
         Lift ma                  -> Lift (f <$> ma)
@@ -151,7 +151,6 @@ instance Functor m => Functor (EntityF deps roots state query m) where
         Interact l g             -> Interact l (fmap f <$> g)
         Query qb                 -> Query $ fmap f qb
         GetRoot key g            -> GetRoot key (fmap f g)
-
 
 -- | `EntityM` is the newtype wrapper over the (church-encoded) free monad
 --   formed from the `EntityF` functor. 
@@ -163,17 +162,17 @@ instance Functor m => Functor (EntityF deps roots state query m) where
 --   `query` is the ADT which represents the entity's algebra 
 --
 --   `m` is the inner functor (which for now will always be IO)
-type EntityM :: Row SlotData -> Row SlotData ->  Type -> (Type -> Type) -> (Type -> Type) -> Type -> Type 
-newtype EntityM deps roots state query m a = EntityM (F (EntityF deps roots  state query m) a) 
+type EntityM :: Row SlotData -> Row SlotData -> Type -> Type -> (Type -> Type) -> (Type -> Type) -> Type -> Type 
+newtype EntityM deps roots surface state query m a = EntityM (F (EntityF deps roots surface state query m) a) 
   deriving (Functor, Applicative, Monad)
 
-instance Functor m => MonadState s (EntityM deps roots s q m) where
+instance Functor m => MonadState st (EntityM deps roots su st q m) where
   state f = EntityM . liftF . State $ f
 
-instance  MonadIO m => MonadIO (EntityM deps roots s q m) where
+instance  MonadIO m => MonadIO (EntityM deps roots su st q m) where
   liftIO m = EntityM . liftF . Lift . liftIO $ m
 
-instance MonadTrans (EntityM deps roots s q ) where
+instance MonadTrans (EntityM deps roots su st q ) where
   lift = EntityM . liftF . Lift
 
 -- for readable partial application 
@@ -240,9 +239,9 @@ data Renderer  state surface where
   , onRender  :: surface -> IO ()
   } -> Renderer state surface 
 
-newtype Handler  slot query deps roots state 
+newtype Handler  slot query deps roots surface state 
   = Handler {getHandler :: Store (Chart deps roots) 
-                                 (AlgebraQ query :~> EntityM  deps roots state query IO)}
+                                 (AlgebraQ query :~> EntityM  deps roots surface state query IO)}
 
 class Forall ks c => All c ks where 
   allC :: Dict (Forall ks c)
@@ -300,7 +299,7 @@ data Spec state slot where
   MkSpec :: forall state query (deps :: Row SlotData) surface roots (shoots :: Row IxSlotData) i source
           . ( WellBehaved roots ) =>
     { initialState   :: state 
-    , handleQuery    :: Handler (Slot surface roots deps query) query deps roots state
+    , handleQuery    :: Handler (Slot surface roots deps query) query deps roots surface state
     , renderer       :: Renderer state surface 
     , atlas          :: Chart deps roots
     } -> Spec state (Slot surface roots deps query)
@@ -851,12 +850,33 @@ class SlotD c slot where
 instance (c ds) => SlotD c (Slot su rs ds q) where 
   slotD = DepsW 
 
+instance HasDict (c rs) (RootsW c (Slot su rs ds q)) where 
+  evidence RootsW = Dict
+
+mkSlotD :: forall c ds su rs q 
+         . c ds :- SlotD c (Slot su rs ds q)
+mkSlotD = Sub Dict 
+
+mkSlotR :: forall c rs su ds q
+         . c rs :- SlotR c (Slot su rs ds q)
+mkSlotR = Sub Dict 
+
+unSlotR :: forall c su rs ds q. SlotR c (Slot su rs ds q) :- c rs 
+unSlotR = unmapDict go  
+  where 
+    go :: Dict (SlotR c (Slot su rs ds q)) -> Dict (c rs) 
+    go Dict = case slotR :: RootsW c (Slot su rs ds q) of 
+          RootsW -> Dict 
+
 type SlotR :: (Row SlotData -> Constraint) -> SlotData -> Constraint 
 class SlotR c slot where 
   slotR :: RootsW c slot 
 
 instance c rs => SlotR c (Slot su rs ds q) where 
   slotR = RootsW  
+
+instance HasDict (c ds) (DepsW c (Slot su rs ds q)) where 
+  evidence DepsW = Dict 
 
 class ( SlotD (Compat root) slot
       , SlotR (All (SlotD (Compat root))) slot
@@ -869,6 +889,22 @@ class ( SlotD (Compat root) slot
 
   coherentRec :: Dict (SlotR (All (Coherent root)) slot)
   coherentRec = Dict 
+
+coherentSUQ :: forall su su' q q' root rs ds 
+             . Coherent root (Slot su rs ds q) :- Coherent root (Slot su' rs ds q') 
+coherentSUQ = unmapDict go 
+  where 
+    go :: Dict (Coherent root (Slot su rs ds q)) -> Dict (Coherent root (Slot su' rs ds q'))
+    go Dict = coherentSUQ' @su @su' @q @q' @root @rs @ds 
+
+coherentSUQ' :: forall su su' q q' root rs ds 
+             . Coherent root (Slot su rs ds q) => Dict (Coherent root (Slot su' rs ds q'))
+coherentSUQ' = case coherent @root @(Slot su rs ds q) of 
+  (d1@Dict,d2@Dict,d3@Dict,rw@RootsW,dw@DepsW) -> case mapDict (mkSlotR @(All (Coherent root)) @rs @su' @ds @q') Dict of 
+    dx@Dict ->  case mapDict (mkSlotD @(Compat root) @ds @su' @rs @q') Dict of 
+      dy@Dict -> case (coherentD :: Dict (SlotR (All (SlotD (Compat root))) (Slot su rs ds q))) of 
+        dz@Dict -> case mapDict (mkSlotR @(All (SlotD  (Compat root))) @rs @su' @ds @q') (mapDict unSlotR d2) of
+          dw@Dict -> Dict   
 
 -- ALL THE EVIDENCE
 coherent :: forall root slot 

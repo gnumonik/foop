@@ -26,9 +26,9 @@ import Control.Monad.Free.Church
 
 type SlotI i su cs ds q = IxSlot i (Slot su cs ds q)
 
-origin :: forall deps roots state query r 
-       . (forall su. Origin (Slot su roots deps query) -> r) 
-      -> EntityM deps roots state query IO r
+origin :: forall deps roots surface state query r 
+       . (Origin (Slot surface roots deps query) -> r) 
+      -> EntityM deps roots surface state query IO r
 origin f = EntityM . liftF $ Origin f 
 
 data ContainerLogic :: Type -> SlotData -> Type -> Type where 
@@ -78,7 +78,7 @@ mkContainer (Model (MkSpec iSt b rndr ds) mdls ) = flip Model mdls $ MkSpec {
       runContainerLogic :: forall x
                          . Chart ds rs
                         -> ContainerLogic i (Slot su rs ds q) x
-                        -> EntityM ds rs (M.Map i (Entity (Slot su rs ds q))) (ContainerLogic i (Slot su rs ds q)) IO x
+                        -> EntityM ds rs (M.Map i (Entity (Slot su rs ds q))) (M.Map i (Entity (Slot su rs ds q))) (ContainerLogic i (Slot su rs ds q)) IO x
       runContainerLogic _ = \case 
         Tell i q x -> gets (M.lookup i) >>= \case 
           Nothing -> pure x
@@ -92,23 +92,47 @@ mkContainer (Model (MkSpec iSt b rndr ds) mdls ) = flip Model mdls $ MkSpec {
 
         Delete i x -> modify' (M.delete i) >> pure x 
        where 
+         goCreate :: i
+                  -> Model (Slot su rs ds q)
+                  -> Origin
+                        (Slot
+                          (M.Map i (Entity (Slot su rs ds q)))
+                          rs
+                          ds
+                          (ContainerLogic i (Slot su rs ds q)))
+                  -> EntityM ds rs (M.Map i (Entity (Slot su rs ds q))) (M.Map i (Entity (Slot su rs ds q))) (ContainerLogic i (Slot su rs ds q)) IO () 
+         goCreate i mdl orgn = unOrigin orgn (go mdl)
+          where 
+                go :: forall source. Model (Slot su rs ds q)
+                    -> Dict
+                          (Coherent
+                            source
+                            (Slot
+                                (M.Map i (Entity (Slot su rs ds q)))
+                                rs
+                                ds
+                                (ContainerLogic i (Slot su rs ds q))))
+                    -> TMVar (Entity source)
+                    -> EntityM
+                          ds
+                          rs
+                          (M.Map i (Entity (Slot su rs ds q)))
+                          (M.Map i (Entity (Slot su rs ds q)))
+                          (ContainerLogic i (Slot su rs ds q))
+                          IO
+                          ()
+                go mdl d@Dict tmv = case mapDict (coherentSUQ @(M.Map i (Entity (Slot su rs ds q))) @su @(ContainerLogic i (Slot su rs ds q)) @q @source @rs @ds) d of 
+                  dx@Dict -> do 
+                    e <- liftIO . atomically $ new_ tmv mdl
+                    modify' $ M.insert i e 
+
+         {--
          goCreate :: forall sx 
                    . i
                   -> Model (Slot su rs ds q)
                   -> Origin (Slot su rs ds (ContainerLogic i (Slot su rs ds q)))
-                  -> EntityM ds rs (M.Map i (Entity (Slot su rs ds q))) (ContainerLogic i (Slot su rs ds q)) IO () 
+                  -> EntityM ds rs (M.Map i (Entity (Slot su rs ds q))) (M.Map i (Entity (Slot su rs ds q))) (ContainerLogic i (Slot su rs ds q)) IO () 
          goCreate i mdl org@(MkOrigin tmv) =  unOrigin org (go mdl) 
            where 
-             go :: forall source
-                 . Model (Slot su rs ds q) 
-                -> Dict (Coherent source (Slot su rs ds q))
-                -> TMVar (Entity source)
-                -> EntityM
-                    ds
-                    rs
-                    (M.Map i (Entity (Slot su rs ds q)))
-                    (ContainerLogic i (Slot su rs ds q))
-                    IO
-                    ()
-             go = undefined 
-             
+
+             --}

@@ -320,7 +320,7 @@ mkRequest q = q id
 
 evalF :: forall  roots  surface state query root deps a
     .  EvalState  deps roots  surface state query
-    -> EntityF deps roots state query IO a
+    -> EntityF deps roots surface state query IO a
     -> ST.StateT (ExEvalState deps roots surface query) IO a
 evalF eState@EvalState{..} = \case
 
@@ -402,11 +402,11 @@ create  i p = EntityM . liftF $ Create (ShootKey @l ) Label i p ()
 
 -}
 
-observe :: forall l i su cs ds q deps roots state query m a 
+observe :: forall l i su cs ds q deps roots state query surface m a 
           . (Functor m
           , KnownSymbol l
           , HasType l (Slot su cs ds q) deps) 
          => Label l 
          -> (su -> a) 
-         -> EntityM deps roots  state query m a
+         -> EntityM deps roots surface state query m a
 observe l f = EntityM . liftF $ Interact l (\(ENode e) -> f <$> peekSurface e)
